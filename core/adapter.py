@@ -26,6 +26,8 @@ class Adapter:
                       'error': None, 'polling': False, 'selectedPids': [], 'interval': 1000,
                       'supported': {}, 'characteristics': [], 'latest': [], 'scanId': None}
         self.poll_task = None
+        self.connection_id = None
+        self.connection_address = None
 
     async def devices(self):
         from bleak import BleakScanner
@@ -44,6 +46,8 @@ class Adapter:
             return {'devices': ports, 'warning': f'Bluetooth LE discovery failed: {exc}. {hint} Available serial ports are still listed.'}
 
     def disconnected(self, _client):
+        if _client is not self.client:
+            return
         self.state.update(connected=False, ready=False, polling=False, error='Adapter disconnected. Reconnect before scanning.')
         if self.waiter and not self.waiter.done():
             self.waiter.set_exception(ConnectionError('Bluetooth disconnected'))
@@ -54,6 +58,30 @@ class Adapter:
             self.buffer = self.buffer[-65536:]
         if '>' in self.buffer and self.waiter and not self.waiter.done():
             self.waiter.set_result(self.buffer.split('>', 1)[0])
+
+    async def connect_ble(self, device):
+        from bleak import BleakClient, BleakScanner
+        details = getattr(device, 'details', {}) or {}
+        match = re.match(r'^/org/bluez/(hci\d+)/', details.get('path', '')) if isinstance(details, dict) else None
+        options = {'bluez': {'adapter': match[1]}} if sys.platform == 'linux' and match else {}
+        for attempt in range(2):
+            self.client = BleakClient(device, disconnected_callback=self.disconnected, timeout=20, **options)
+            try:
+                await self.client.connect()
+                return device
+            except Exception as exc:
+                await self._close()
+                transient = any(text in str(exc).lower() for text in (
+                    'inprogress', 'doesnotexist', 'not found', 'le-connection-abort-by-local', 'connection timed out'))
+                if attempt or sys.platform != 'linux' or not transient:
+                    raise
+                # A failed bond or another radio can invalidate cached BlueZ paths.
+                # Re-discover on the same radio instead of reconnecting a stale object.
+                fresh = await BleakScanner.find_device_by_address(device.address, timeout=8, **options)
+                if fresh is None:
+                    raise ConnectionError('Carista is not currently advertising on this Pi radio. Check range, power and other apps.') from exc
+                device = fresh
+                self.device_cache[device.address] = device
 
     async def connect(self, spec):
         await self.disconnect()
@@ -70,13 +98,11 @@ class Adapter:
                 self.serial = await asyncio.to_thread(serial.Serial, spec['id'], baud, timeout=0.1, write_timeout=3)
                 self.state.update(connected=True, transport='serial', device=spec.get('name', spec['id']), error=None, characteristics=[])
             elif transport == 'ble':
-                from bleak import BleakClient
                 device = self.device_cache.get(spec.get('id'))
                 if not device:
                     raise ValueError('Discover devices and select one from the list first.')
-                self.client = BleakClient(device, disconnected_callback=self.disconnected, timeout=20)
                 try:
-                    await self.client.connect()
+                    device = await self.connect_ble(device)
                     chars = [{'service': s.uuid, 'uuid': c.uuid, 'handle': c.handle, 'properties': c.properties}
                              for s in self.client.services for c in s.characteristics]
                     self.state.update(connected=True, transport='ble', device=spec.get('name') or device.name,
@@ -84,14 +110,18 @@ class Adapter:
                     evo_service = '000018f0-0000-1000-8000-00805f9b34fb'
                     if any(c['service'] == evo_service and c['uuid'].startswith('00002af1-') for c in chars) and any(c['service'] == evo_service and c['uuid'].startswith('00002af0-') for c in chars):
                         self.state['profile'] = 'Carista EVO UART (validated on this unit)'
-                except Exception:
+                except Exception as exc:
                     await self._close()
+                    self.state['error'] = f'Could not connect to receiver: {exc}. Check range and close other apps using it. Carista EVO can normally Connect without Pair.'
                     raise
             else:
                 raise ValueError('Choose Bluetooth LE or a paired serial port.')
+        import uuid
+        self.connection_id = str(uuid.uuid4())
+        self.connection_address = spec['id'].upper() if transport == 'ble' else spec['id']
         return dict(self.state)
 
-    async def initialize(self, spec):
+    async def initialize(self, spec, *, discover_pids=True):
         await self.stop_poll()
         async with self.operation:
             if not self.state['connected']:
@@ -134,6 +164,8 @@ class Adapter:
                 if not supported:
                     raise ValueError('No valid standard OBD response. Check ignition, adapter seating, and vehicle support. Raw trace is available.')
                 for base in range(32, 225, 32):
+                    if not discover_pids:
+                        break
                     if not any(f'{base:02X}' in values for values in supported.values()):
                         break
                     extra = obd.supported(await self.command(f'01{base:02X}'), base, self.protocol)
@@ -184,7 +216,7 @@ class Adapter:
                 raise ConnectionError('Response exceeded the diagnostic buffer.')
         raise TimeoutError('Serial response timed out')
 
-    async def scan(self, vehicle):
+    async def scan(self, vehicle, *, codes_only=False):
         validated = validate_scan({'vehicle': dict(vehicle), 'codes': []})
         vehicle = validated['vehicle']
         expected_vin = validated.get('vin')
@@ -194,7 +226,8 @@ class Adapter:
             trace_start = len(self.trace)
             record = {'vehicle': vehicle, 'source': 'Carista EVO / ELM-compatible', 'demo': False,
                       'protocol': self.protocol, 'codes': [], 'readings': [], 'warnings': [],
-                      'supported': self.state['supported'], 'scope': 'Standard emissions OBD-II; not a full manufacturer module scan.'}
+                      'supported': self.state['supported'], 'codeCoverage': {}, 'codeReadAt': {},
+                      'scope': 'Standard emissions OBD-II; not a full manufacturer module scan.'}
             detected_vin = obd.vin(await self.command('0902'), self.protocol)
             if detected_vin and expected_vin and detected_vin != expected_vin:
                 raise ValueError('The connected vehicle VIN does not match the selected vehicle. Select the correct vehicle or clear the VIN field before scanning.')
@@ -205,21 +238,25 @@ class Adapter:
             record['monitors'] = obd.monitor(await self.command('0101'), self.protocol)
             for mode in ('03', '07', '0A'):
                 raw = await self.command(mode)
+                record['codeReadAt'][mode] = now()
                 parsed = obd.payloads(raw, self.protocol)
                 expected = int(mode, 16) + 0x40
+                record['codeCoverage'][mode] = sorted({r['ecu'] for r in parsed if r['data'] and r['data'][0] == expected})
                 if not any(r['data'] and r['data'][0] == expected for r in parsed):
                     record['warnings'].append(f'Mode {mode} did not provide a valid positive response; coverage is incomplete.')
                 record['codes'].extend(obd.dtcs(raw, mode, self.protocol))
             for pid in ('04', '05', '0C', '0D', '42', '21', '30', '31', '5B'):
-                if any(pid in values for values in self.state['supported'].values()):
+                if not codes_only and any(pid in values for values in self.state['supported'].values()):
                     record['readings'].extend(obd.readings(await self.command('01' + pid), pid, self.protocol))
             record['readings'].extend(obd.supply_voltage(await self.command('ATRV')))
             # Preserve frame-zero evidence, without claiming it describes every DTC.
             freeze = []
             for pid in ('02', '04', '05', '0C', '0D', '06', '07'):
-                freeze.append({'pid': pid, 'raw': await self.command('02' + pid + '00')})
+                if not codes_only:
+                    freeze.append({'pid': pid, 'raw': await self.command('02' + pid + '00')})
             record['freezeFrame'] = freeze
             record['trace'] = self.trace[trace_start:]
+            record['scanStatus'] = 'complete' if all(record['codeCoverage'].values()) else 'partial'
             saved = self.save_scan(record)
             self.state.update(scanId=saved['id'], latest=record['readings'])
             return saved

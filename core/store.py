@@ -1,10 +1,12 @@
 import datetime as dt
 import json
 import math
+import os
 from pathlib import Path
 import re
 import sqlite3
 import threading
+import tempfile
 import uuid
 
 
@@ -31,6 +33,7 @@ def vehicle_sort_key(vehicle):
 
 class Store:
     def __init__(self, path):
+        self.directory = Path(path).resolve().parent
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(path, check_same_thread=False)
         self.lock = threading.RLock()
@@ -40,8 +43,13 @@ class Store:
             CREATE TABLE IF NOT EXISTS samples(id INTEGER PRIMARY KEY, scan_id TEXT, time TEXT, data TEXT);
             CREATE INDEX IF NOT EXISTS samples_scan ON samples(scan_id, id);
             CREATE TABLE IF NOT EXISTS definitions(id TEXT PRIMARY KEY, data TEXT);
+            CREATE INDEX IF NOT EXISTS scans_vin_created ON scans(json_extract(data,'$.vin'),created);
+            CREATE TABLE IF NOT EXISTS diagnostic_files(
+                scan_id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE, payload TEXT NOT NULL,
+                written_at TEXT, error TEXT);
         ''')
         self.db.commit()
+        self.repair_diagnostic_files()
         # Jobs cannot outlive the server process; never leave a stale spinner.
         for row in self.db.execute('SELECT id,data FROM scans').fetchall():
             scan = json.loads(row[1])
@@ -61,29 +69,111 @@ class Store:
         scan['id'] = str(uuid.uuid4())
         scan['createdAt'] = dt.datetime.now(dt.timezone.utc).isoformat()
         scan.setdefault('research', {'status': 'idle'})
+        scan.pop('diagnosticFile', None)
+        scan.pop('diagnosticFileError', None)
+        if not scan.get('demo'):
+            timestamp = dt.datetime.fromisoformat(scan['createdAt'])
+            reader = scan.get('reader') if isinstance(scan.get('reader'), dict) else {}
+            identity = scan.get('vin') or re.sub(r'[^A-Za-z0-9]', '', str(reader.get('address', 'unidentified')))[:32] or 'unidentified'
+            scan['diagnosticFile'] = f'diagnostics/{timestamp:%Y-%m-%d}/{identity}_{timestamp:%Y-%m-%dT%H-%M-%S.%fZ}_{scan["id"]}.json'
         with self.lock, self.db:
             self.db.execute('INSERT INTO scans VALUES(?,?,?)', (scan['id'], scan['createdAt'], json.dumps(scan)))
-        return scan
+            if scan.get('diagnosticFile'):
+                self.db.execute('INSERT INTO diagnostic_files(scan_id,path,payload) VALUES(?,?,?)',
+                                (scan['id'], scan['diagnosticFile'], json.dumps(scan, ensure_ascii=False, indent=2) + '\n'))
+        if scan.get('diagnosticFile'):
+            self.write_diagnostic_file(scan['id'])
+        return self.get(scan['id'])
+
+    def write_diagnostic_file(self, scan_id):
+        with self.lock:
+            row = self.db.execute('SELECT path,payload FROM diagnostic_files WHERE scan_id=?', (scan_id,)).fetchone()
+            if not row:
+                return
+            temporary = None
+            try:
+                destination = (self.directory / row[0]).resolve()
+                if self.directory not in destination.parents:
+                    raise ValueError('Diagnostic file is outside the data directory.')
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                payload = row[1].encode('utf-8')
+                if destination.exists():
+                    if destination.read_bytes() != payload:
+                        raise ValueError('An existing diagnostic file differs from the saved snapshot; it was preserved.')
+                else:
+                    with tempfile.NamedTemporaryFile(dir=destination.parent, prefix='.pending-', delete=False) as stream:
+                        temporary = Path(stream.name)
+                        stream.write(payload)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    temporary.replace(destination)
+                    temporary = None
+                with self.db:
+                    self.db.execute('UPDATE diagnostic_files SET written_at=?,error=NULL WHERE scan_id=?',
+                                    (dt.datetime.now(dt.timezone.utc).isoformat(), scan_id))
+            except Exception as exc:
+                with self.db:
+                    self.db.execute('UPDATE diagnostic_files SET error=? WHERE scan_id=?', (str(exc), scan_id))
+            finally:
+                if temporary:
+                    temporary.unlink(missing_ok=True)
+
+    def repair_diagnostic_files(self):
+        with self.lock:
+            pending = [r[0] for r in self.db.execute('SELECT scan_id FROM diagnostic_files WHERE written_at IS NULL')]
+        for scan_id in pending:
+            self.write_diagnostic_file(scan_id)
+
+    def diagnostic_file(self, scan_id):
+        with self.lock:
+            row = self.db.execute('SELECT path,written_at,error FROM diagnostic_files WHERE scan_id=?', (scan_id,)).fetchone()
+        if not row or not row[1]:
+            raise LookupError('No completed diagnostic file is available for this scan.')
+        path = (self.directory / row[0]).resolve()
+        if self.directory not in path.parents or not path.is_file():
+            raise LookupError('Diagnostic file not found.')
+        return path
 
     def get(self, scan_id):
         with self.lock:
             row = self.db.execute('SELECT data FROM scans WHERE id=?', (scan_id,)).fetchone()
         if not row:
             raise LookupError('Scan not found.')
-        return json.loads(row[0])
+        scan = json.loads(row[0])
+        with self.lock:
+            artifact = self.db.execute('SELECT error FROM diagnostic_files WHERE scan_id=?', (scan_id,)).fetchone()
+        if artifact and artifact[0]:
+            scan['diagnosticFileError'] = artifact[0]
+        return scan
 
     def update(self, scan):
         with self.lock, self.db:
             self.db.execute('UPDATE scans SET data=? WHERE id=?', (json.dumps(scan), scan['id']))
 
-    def _summaries(self):
+    def _summaries(self, recent_per_vehicle=None):
         with self.lock:
-            rows = self.db.execute('''SELECT id,created,json_extract(data,'$.vehicle'),
+            source = 'scans'
+            prefix = ''
+            suffix = ''
+            parameters = ()
+            if recent_per_vehicle:
+                prefix = '''WITH recent AS (SELECT *,row_number() OVER (
+                    PARTITION BY coalesce(json_extract(data,'$.vin'),id) ORDER BY created DESC,id DESC) AS position,
+                    count(*) OVER (PARTITION BY coalesce(json_extract(data,'$.vin'),id)) AS total
+                    FROM scans WHERE coalesce(json_extract(data,'$.scanStatus'),'')!='failed'
+                    AND (json_extract(data,'$.vin') IS NOT NULL OR json_extract(data,'$.automation') IS NULL)) '''
+                source = 'recent'
+                suffix = ' WHERE position<=?'
+                parameters = (recent_per_vehicle,)
+            rows = self.db.execute(prefix + '''SELECT id,created,json_extract(data,'$.vehicle'),
                 json_extract(data,'$.vin'),json_extract(data,'$.demo'),json_extract(data,'$.source'),
-                json_extract(data,'$.codes'),json_extract(data,'$.scope'),json_extract(data,'$.research')
-                FROM scans ORDER BY created DESC,id DESC''').fetchall()
+                json_extract(data,'$.codes'),json_extract(data,'$.scope'),json_extract(data,'$.research'),
+                json_extract(data,'$.scanStatus'),json_extract(data,'$.diagnosticFile'),json_extract(data,'$.automation'),
+                ''' + ('total' if recent_per_vehicle else '1') + f' FROM {source}{suffix} ORDER BY created DESC,id DESC', parameters).fetchall()
         return [{'id': r[0], 'createdAt': r[1], 'vehicle': json.loads(r[2]), 'vin': r[3], 'demo': bool(r[4]),
-                 'source': r[5], 'codes': json.loads(r[6]), 'scope': r[7], 'research': json.loads(r[8]) if r[8] else None}
+                 'source': r[5], 'codes': json.loads(r[6]), 'scope': r[7], 'research': json.loads(r[8]) if r[8] else None,
+                 'scanStatus': r[9], 'diagnosticFile': r[10], 'automation': json.loads(r[11]) if r[11] else None,
+                 'totalScanCount': r[12]}
                 for r in rows]
 
     def list(self):
@@ -94,12 +184,15 @@ class Store:
 
     def vehicles(self):
         grouped = {}
-        for scan in self._summaries():
+        for scan in self._summaries(recent_per_vehicle=50):
+            if scan.get('scanStatus') == 'failed':
+                continue
             # Never merge unidentified cars just because their model names match.
             key = ('demo:' if scan['demo'] else 'vin:') + scan['vin'] if scan.get('vin') else 'scan:' + scan['id']
             if key not in grouped:
                 grouped[key] = {'key': key, 'vin': scan.get('vin'), 'vehicle': dict(scan['vehicle']),
-                                'demo': scan['demo'], 'scans': [], 'latestScanId': scan['id'], 'lastScanAt': scan['createdAt']}
+                                'demo': scan['demo'], 'scans': [], 'totalScanCount': scan['totalScanCount'],
+                                'latestScanId': scan['id'], 'lastScanAt': scan['createdAt']}
             group = grouped[key]
             for field in VEHICLE_FIELDS:
                 if str(group['vehicle'].get(field) or '').strip().casefold() in UNKNOWN_LABELS and scan['vehicle'].get(field):

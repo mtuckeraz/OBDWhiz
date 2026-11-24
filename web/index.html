@@ -11,11 +11,12 @@
   <nav aria-label="Main navigation">
     <button data-view="workspace" class="nav active"><span>▦</span> Overview</button>
     <button data-view="connection" class="nav"><span>⌁</span> Adapter & vehicle</button>
+    <button data-view="fleet" class="nav"><span>↻</span> Fleet scans</button>
     <button data-view="library" class="nav"><span>▤</span> OEM reference library</button>
     <button data-view="adaptations" class="nav"><span>⚙</span> Adaptation planner</button>
     <button data-view="setup" class="nav"><span>◈</span> Setup</button>
   </nav>
-  <div class="sidebar-bottom"><div class="local-badge"><span class="dot"></span> Local workspace</div><p>Raspberry Pi Bluetooth → local HTTP<br>Your scan history stays here.</p><span class="version">OBDWhiz / v0.3.0</span></div>
+  <div class="sidebar-bottom"><div class="local-badge"><span class="dot"></span> Local workspace</div><p>Raspberry Pi Bluetooth → local HTTP<br>Your scan history stays here.</p><span class="version">OBDWhiz / v0.4.0</span></div>
 </aside>
 <div class="main-wrap">
 <header class="topbar"><div><span class="breadcrumb">WORKSPACE</span><span id="view-name">Overview</span></div><div class="actions"><button id="connection-badge" class="badge neutral" data-view="connection">Adapter disconnected</button><button id="sign-out" class="text-button" hidden>Sign out</button></div></header>
@@ -25,6 +26,11 @@
   <div class="stats"><article><span>SAVED VEHICLES</span><strong id="vehicle-count">0</strong><p id="session-count">Stored on the Pi</p></article><article><span>ADAPTER</span><strong id="adapter-summary">Offline</strong><p id="adapter-detail">Carista EVO · direct Bluetooth</p></article><article><span>AI RESEARCH</span><strong id="ai-summary">Not configured</strong><p>Cited causes & diagnostic checks</p></article></div>
   <div class="work-grid"><section class="panel history"><div class="panel-heading"><h2>Vehicles</h2><span class="muted small">Make / model A–Z</span></div><div id="scan-list"></div><button class="text-button" id="demo">Explore a demo scan</button></section>
     <section class="panel detail"><div id="scan-detail"><div class="empty hero-empty"><div class="scan-symbol">⌁</div><p class="eyebrow">READY WHEN YOU ARE</p><h2>Start with a clear picture.</h2><p>Connect your Carista EVO to read fault codes and available live values. Or import a manufacturer scan to investigate more modules.</p><button class="button primary" data-view="connection">Set up a vehicle</button></div></div></section></div>
+</section>
+<section id="fleet" class="view">
+  <div class="page-title"><div><p class="eyebrow">EVERY READER. DATED EVIDENCE.</p><h1>Automatic fleet scans.</h1><p class="muted">Register up to ten Carista readers. The Pi scans reachable vehicles continuously, even when this browser is closed.</p></div><button id="fleet-toggle" class="button secondary">Pause automatic scans</button></div>
+  <section class="panel"><div class="panel-heading"><h2 id="fleet-count">Fleet readers</h2><span id="fleet-worker" class="badge neutral">Waiting</span></div><p id="fleet-error" class="error-text" role="status"></p><label>Minimum time between scan attempts per vehicle<select id="fleet-interval"><option value="5">Fastest · 5 seconds</option><option value="15">15 seconds</option><option value="30">30 seconds</option><option value="60">1 minute</option><option value="300">5 minutes</option></select></label><p class="muted small">Readers take turns. Actual intervals depend on scan duration, radio range and vehicle response. A fresh scan is evidence, not clearance that a vehicle is safe to leave.</p><div id="fleet-readers" class="fleet-readers"></div></section>
+  <section class="panel spaced"><h2>Recent diagnostic activity</h2><p class="muted">Each scan and failed attempt gets a dated JSON file. Code times mean first observed by the Pi. Signal loss is recorded as an inferred departure with the latest available scan; returns trigger a fresh scan.</p><div id="fleet-events"></div></section>
 </section>
 <section id="connection" class="view">
   <div class="page-title"><div><p class="eyebrow">DIRECT TO YOUR RASPBERRY PI</p><h1>Adapter & vehicle.</h1><p class="muted">Bluetooth stays on the Pi. Set up your receiver from this browser.</p></div></div>

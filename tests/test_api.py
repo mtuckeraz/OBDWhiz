@@ -105,6 +105,24 @@ class ApiTests(unittest.TestCase):
     def test_invalid_vin_import_is_rejected(self):
         self.assertEqual(self.request('/api/import', {'vehicle': {}, 'vin': 'invalid', 'codes': []})[0], 400)
 
+    def test_diagnostic_file_download_is_dated_and_ignores_imported_file_paths(self):
+        status, _, body = self.request('/api/import', {'vehicle': {'make': 'BMW'}, 'codes': [], 'diagnosticFile': '../../.env'})
+        self.assertEqual(status, 200)
+        scan = json.loads(body)
+        self.assertNotIn('..', scan['diagnosticFile'])
+        status, headers, payload = self.request('/api/scans/' + scan['id'] + '/diagnostic')
+        self.assertEqual(status, 200)
+        self.assertIn('attachment;', dict(headers)['Content-Disposition'])
+        self.assertEqual(json.loads(payload)['id'], scan['id'])
+
+    def test_fleet_api_settings_and_event_cursor_validation(self):
+        status, _, body = self.request('/api/fleet')
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)['capacity'], 10)
+        self.assertEqual(self.request('/api/fleet/settings', {'scanIntervalSeconds': 1})[0], 400)
+        self.assertEqual(self.request('/api/fleet/events?after=-1')[0], 400)
+        self.assertEqual(self.request('/api/fleet/events?after=0&limit=2')[0], 200)
+
 
 if __name__ == '__main__':
     unittest.main()

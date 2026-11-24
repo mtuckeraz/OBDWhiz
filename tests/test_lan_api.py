@@ -57,6 +57,7 @@ class LanApiTests(unittest.TestCase):
         self.assertEqual(self.request('/')[0], 200)
         self.assertFalse(json.loads(self.request('/api/session')[2])['authenticated'])
         for path, body in [('/api/status', None), ('/api/scans', None), ('/api/bluetooth', None),
+                           ('/api/fleet', None), ('/api/fleet/events', None), ('/api/fleet/settings', {'enabled': False}),
                            ('/api/bluetooth/pair', {'id': 'address'}),
                            ('/api/bluetooth/answer', {'promptId': 'fake', 'value': '1234'}),
                            ('/api/connect', {}), ('/api/settings', {})]:

@@ -1,0 +1,214 @@
+import asyncio
+import datetime as dt
+import json
+from pathlib import Path
+import tempfile
+import time
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+import uuid
+
+from core.adapter import Adapter
+from core.bluetooth import Bluetooth
+from core.fleet import Fleet
+from core.fleet_store import FleetStore
+from core.store import Store
+
+
+RADIO = '/org/bluez/hci0'
+
+
+def spec(number=0):
+    return {'address': f'AA:BB:CC:DD:EE:{number:02X}', 'name': 'Carista EVO', 'label': f'Fleet vehicle {number}', 'controller': RADIO}
+
+
+class DiagnosticArchiveTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.path = Path(self.temp.name) / 'fleet.sqlite3'
+        self.store = Store(self.path)
+
+    def tearDown(self):
+        self.store.db.close()
+        self.temp.cleanup()
+
+    def scan(self):
+        return self.store.save_scan({'vehicle': {'make': 'BMW', 'model': 'Test'}, 'vin': 'WBA12345678901234',
+                                    'codes': [{'code': 'P0300', 'ecu': '7E8', 'status': 'stored'}], 'trace': [{'response': 'evidence'}]})
+
+    def test_dated_snapshot_is_private_and_does_not_change_when_vehicle_is_edited(self):
+        scan = self.scan()
+        file = self.store.diagnostic_file(scan['id'])
+        self.assertRegex(file.name, r'\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{6}Z_')
+        original = file.read_bytes()
+        self.assertEqual(json.loads(original)['id'], scan['id'])
+        self.store.update_vehicle(scan['vin'], {'make': 'BMW', 'model': 'Corrected name'})
+        self.assertEqual(file.read_bytes(), original)
+        self.assertEqual(self.store.get(scan['id'])['vehicle']['model'], 'Corrected name')
+
+    def test_failed_file_write_preserves_sqlite_record_and_recovers_after_restart(self):
+        with patch('core.store.os.fsync', side_effect=OSError('Test disk write failure')):
+            scan = self.scan()
+        self.assertIn('Test disk write failure', scan['diagnosticFileError'])
+        self.assertEqual(self.store.get(scan['id'])['codes'][0]['code'], 'P0300')
+        self.store.db.close()
+        self.store = Store(self.path)
+        self.assertTrue(self.store.diagnostic_file(scan['id']).exists())
+        self.assertNotIn('diagnosticFileError', self.store.get(scan['id']))
+
+    def test_existing_different_file_is_never_silently_overwritten(self):
+        scan = self.scan()
+        file = self.store.diagnostic_file(scan['id'])
+        file.write_text('externally changed diagnostic evidence')
+        self.store.write_diagnostic_file(scan['id'])
+        self.assertEqual(file.read_text(), 'externally changed diagnostic evidence')
+        self.assertIn('preserved', self.store.get(scan['id'])['diagnosticFileError'])
+
+
+class FleetStoreTests(unittest.TestCase):
+    tearDown = DiagnosticArchiveTests.tearDown
+    scan = DiagnosticArchiveTests.scan
+
+    def setUp(self):
+        DiagnosticArchiveTests.setUp(self)
+        self.fleet = FleetStore(self.store)
+
+    def test_ten_reader_capacity_and_registration_survive_restart(self):
+        for number in range(10):
+            self.fleet.register(spec(number))
+        self.fleet.register({**spec(0), 'label': 'Renamed fleet vehicle'})
+        with self.assertRaisesRegex(ValueError, 'up to 10'):
+            self.fleet.register(spec(10))
+        self.assertEqual(len(FleetStore(self.store).readers()), 10)
+        self.fleet.remove(spec(0)['address'])
+        self.fleet.register(spec(10))
+        self.assertEqual(len(self.fleet.readers()), 10)
+
+    def test_code_absence_requires_positive_response_from_the_same_ecu_and_mode(self):
+        address = self.fleet.register(spec())['address']
+        first = self.scan()
+        first['codeCoverage'] = {'03': ['7E8'], '07': [], '0A': []}
+        self.fleet.track_codes(address, first)
+        self.fleet.track_codes(address, {**first, 'codes': [], 'codeCoverage': {'03': ['7E9']}})
+        events = self.fleet.events()['events']
+        self.assertEqual(sum(e['type'] == 'code_first_observed' for e in events), 1)
+        self.assertFalse(any(e['type'] == 'code_no_longer_reported' for e in events))
+        self.fleet.track_codes(address, {**first, 'codes': [], 'codeCoverage': {'03': ['7E8']}})
+        self.assertEqual(sum(e['type'] == 'code_no_longer_reported' for e in self.fleet.events()['events']), 1)
+
+    def test_event_cursors_are_incremental_and_removing_reader_keeps_history(self):
+        reader = self.fleet.register(spec())
+        first = self.fleet.events(limit=1)
+        self.fleet.event(reader['address'], 'test_event')
+        next_page = self.fleet.events(after=first['nextCursor'])
+        self.assertEqual(next_page['events'][0]['type'], 'test_event')
+        self.fleet.remove(reader['address'])
+        self.assertTrue(any(e['type'] == 'test_event' for e in self.fleet.events()['events']))
+
+
+class FakeReader(Adapter):
+    connected_count = 0
+    maximum = 0
+
+    async def connect(self, request):
+        FakeReader.connected_count += 1
+        FakeReader.maximum = max(FakeReader.maximum, FakeReader.connected_count)
+        self.connection_address = request['id']
+        self.connection_id = str(uuid.uuid4())
+        self.state.update(connected=True, ready=False)
+        return dict(self.state)
+
+    async def initialize(self, request, **kwargs):
+        self.state['ready'] = True
+        return dict(self.state)
+
+    async def scan(self, vehicle, **kwargs):
+        await asyncio.sleep(0)
+        return self.save_scan({'vehicle': dict(vehicle), 'codes': [{'code': 'P0300', 'ecu': '7E8', 'status': 'stored'}],
+                               'codeCoverage': {'03': ['7E8'], '07': ['7E8'], '0A': ['7E8']},
+                               'vinSource': 'unavailable', 'scanStatus': 'complete', 'trace': [{'response': 'synthetic evidence'}]})
+
+    async def disconnect(self):
+        if self.state['connected']:
+            FakeReader.connected_count -= 1
+        self.state.update(connected=False, ready=False)
+        return dict(self.state)
+
+
+class FleetEngineTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = Store(Path(self.temp.name) / 'fleet.sqlite3')
+        self.manual = FakeReader(self.store.save_scan, self.store.samples)
+        self.bluetooth = Bluetooth()
+        self.bluetooth.controller = RADIO
+        self.fleet = Fleet(self.store, self.bluetooth, self.manual, adapter_factory=FakeReader)
+        FakeReader.connected_count = FakeReader.maximum = 0
+
+    async def asyncTearDown(self):
+        await self.fleet.close()
+        await self.manual.disconnect()
+        self.store.db.close()
+        self.temp.cleanup()
+
+    def enroll(self, number=0):
+        reader = self.fleet.data.register(spec(number))
+        reader = self.fleet.data.observe(reader['address'])
+        self.fleet.seen[reader['address']] = time.monotonic()
+        self.fleet.devices[(reader['address'], RADIO)] = SimpleNamespace(address=reader['address'])
+        return reader
+
+    async def test_ten_readers_take_turns_without_overlapping_connections(self):
+        readers = [self.enroll(n) for n in range(10)]
+        await asyncio.gather(*(self.fleet.scan_one(reader, 'continuous') for reader in readers))
+        self.assertEqual(FakeReader.maximum, 1)
+        self.assertEqual(len(self.store.list()), 10)
+        self.assertEqual(len(list(Path(self.temp.name).rglob('*.json'))), 10)
+        self.assertTrue(all(r['lastScanStatus'] == 'complete' for r in self.fleet.data.readers()))
+
+    async def test_manual_connection_automatically_scans_without_a_browser_scan_click(self):
+        address = spec()['address']
+        self.manual.device_cache[address] = SimpleNamespace(details={'path': RADIO + '/dev_AA_BB_CC_DD_EE_00'})
+        request = {'id': address, 'name': 'Carista EVO', 'transport': 'ble'}
+        await self.manual.connect(request)
+        await self.fleet.manual_connected(request)
+        await self.fleet.manual_task
+        scans = self.store.list()
+        self.assertEqual(len(scans), 1)
+        record = self.store.get(scans[0]['id'])
+        self.assertEqual(record['automation']['trigger'], 'manual_connection')
+        self.assertTrue(self.store.diagnostic_file(record['id']).exists())
+        self.assertTrue(self.manual.state['connected'])
+
+    async def test_signal_loss_debounces_once_and_return_gets_a_new_visit(self):
+        reader = self.enroll()
+        original_visit = reader['visitId']
+        self.fleet.seen[reader['address']] = time.monotonic() - 91
+        self.fleet.presence_tick()
+        self.fleet.presence_tick()
+        events = self.fleet.data.events()['events']
+        departures = [e for e in events if e['type'] == 'departure_inferred']
+        self.assertEqual(len(departures), 1)
+        self.assertFalse(departures[0]['freshScanAtDeparture'])
+        returned = self.fleet.data.observe(reader['address'])
+        self.assertNotEqual(returned['visitId'], original_visit)
+        self.assertIsNone(returned['lastAttemptAt'])
+
+    async def test_oldest_due_reader_wins_and_failed_reader_does_not_starve_others(self):
+        first, second = self.enroll(0), self.enroll(1)
+        self.assertEqual(self.fleet.due_reader()['address'], first['address'])
+        self.fleet.data.scan_started(first['address'], 'continuous')
+        self.fleet.data.scan_failed(first['address'], 'ECU asleep', 'continuous')
+        self.assertEqual(self.fleet.due_reader()['address'], second['address'])
+
+    async def test_failed_attempt_gets_a_file_and_never_becomes_an_all_clear_vehicle(self):
+        reader = self.enroll()
+        with patch.object(FakeReader, 'initialize', side_effect=ValueError('VIN mismatch or ECU unavailable')):
+            await self.fleet.scan_one(reader, 'continuous')
+        self.assertEqual(self.fleet.data.reader(reader['address'])['lastScanStatus'], 'error')
+        attempt = self.store.get(self.store.list()[0]['id'])
+        self.assertEqual(attempt['scanStatus'], 'failed')
+        self.assertTrue(self.store.diagnostic_file(attempt['id']).exists())
+        self.assertEqual(self.store.vehicles(), [])
+        self.assertEqual(FakeReader.connected_count, 0)

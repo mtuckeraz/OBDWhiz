@@ -12,7 +12,7 @@ import socket
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 import webbrowser
 
 ROOT = Path(__file__).resolve().parent
@@ -25,7 +25,8 @@ for line in (ROOT / '.env').read_text(encoding='utf-8').splitlines() if (ROOT / 
 from core import obd
 from core.adapter import Adapter
 from core.access import BrowserAccess, load_access_key
-from core.bluetooth import Bluetooth
+from core.bluetooth import ADAPTER, DEVICE, Bluetooth
+from core.fleet import Fleet
 from core.research import Research
 from core.store import Store
 
@@ -56,6 +57,8 @@ def create_app(data_path=None, *, lan=False, access_key=None):
     thread.start()
     adapter = Adapter(store.save_scan, store.samples)
     adapter.bluetooth = bluetooth
+    fleet = Fleet(store, bluetooth, adapter)
+    adapter.fleet = fleet
 
     async def bluetooth_status():
         status = await bluetooth.snapshot()
@@ -67,11 +70,32 @@ def create_app(data_path=None, *, lan=False, access_key=None):
         return await bluetooth.discover(adapter, spec.get('controller')) if sys.platform == 'linux' else await adapter.devices()
 
     async def connect(spec):
-        if bluetooth.task and not bluetooth.task.done():
-            raise ValueError('Finish or cancel pairing before connecting.')
-        result = await adapter.connect(spec)
-        bluetooth.remember(spec)
-        return result
+        async with fleet.link_lock:
+            if bluetooth.task and not bluetooth.task.done():
+                raise ValueError('Finish or cancel pairing before connecting.')
+            result = await adapter.connect(spec)
+            bluetooth.state.update(status='idle', error=None, prompt=None, device=None)
+            bluetooth.remember(spec)
+            await fleet.manual_connected(spec)
+            return result
+
+    async def register_reader(spec):
+        async with bluetooth.lock:
+            await bluetooth.refresh()
+            address = str(spec.get('address', '')).upper()
+            controller = spec.get('controller') or bluetooth.controller
+            props = next((v[DEVICE] for v in bluetooth.objects.values() if DEVICE in v
+                          and v[DEVICE].get('Address') == address and v[DEVICE].get('Adapter') == controller), None)
+            if not props or ADAPTER not in bluetooth.objects.get(controller, {}):
+                raise ValueError('Discover this receiver on the selected Pi radio before adding it to the fleet.')
+            checked = {**spec, 'address': address, 'controller': controller,
+                       'controllerAddress': bluetooth.objects[controller][ADAPTER].get('Address'),
+                       'name': props.get('Name') or props.get('Alias') or address}
+            return fleet.data.register(checked)
+
+    async def manual_disconnect():
+        async with fleet.link_lock:
+            return await adapter.disconnect()
 
     def run(coroutine):
         future = asyncio.run_coroutine_threadsafe(coroutine, loop)
@@ -93,7 +117,7 @@ def create_app(data_path=None, *, lan=False, access_key=None):
         return result
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = 'OBDWhiz/0.3'
+        server_version = 'OBDWhiz/0.4'
 
         def log_message(self, fmt, *args):
             # Avoid logging imported data or provider keys.
@@ -122,7 +146,7 @@ def create_app(data_path=None, *, lan=False, access_key=None):
                 return False
             return True
 
-        def send_headers(self, status, content_type, length, cookie=None):
+        def send_headers(self, status, content_type, length, cookie=None, filename=None):
             self.send_response(status)
             self.send_header('Content-Type', content_type)
             self.send_header('Content-Length', str(length))
@@ -132,6 +156,8 @@ def create_app(data_path=None, *, lan=False, access_key=None):
             self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
             if cookie:
                 self.send_header('Set-Cookie', cookie)
+            if filename:
+                self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
             self.end_headers()
 
         def json(self, data, status=200, cookie=None):
@@ -148,11 +174,18 @@ def create_app(data_path=None, *, lan=False, access_key=None):
                     return self.json({'required': lan, 'authenticated': not access or access.allowed(self.headers.get('Cookie'))})
                 if path == '/api/bluetooth':
                     return self.json(run(bluetooth_status()))
+                if path == '/api/fleet':
+                    return self.json(fleet.status())
+                if path == '/api/fleet/events':
+                    query = parse_qs(urlparse(self.path).query)
+                    return self.json(fleet.data.events(int(query['after'][0]) if 'after' in query else None, int(query.get('limit', ['100'])[0])))
                 if path == '/api/status':
                     dependencies = {name: importlib.util.find_spec(name) is not None for name in ('bleak', 'serial')}
                     return self.json({'adapter': dict(adapter.state), 'ai': research.config(), 'dependencies': dependencies,
                                       'catalog': obd.catalog(), 'localOnly': not lan,
-                                      'platform': sys.platform, 'installHint': INSTALL_HINT})
+                                      'platform': sys.platform, 'installHint': INSTALL_HINT,
+                                      'automaticScan': {'busyReader': fleet.state['busyReader'],
+                                                        'manualPending': bool(fleet.manual_task and not fleet.manual_task.done())}})
                 if path == '/api/scans':
                     return self.json(store.list())
                 if path == '/api/vehicles':
@@ -161,9 +194,14 @@ def create_app(data_path=None, *, lan=False, access_key=None):
                     return self.json(store.definitions())
                 if path == '/api/adapter/trace':
                     return self.json({'adapter': dict(adapter.state), 'trace': list(adapter.trace)})
-                match = re.fullmatch(r'/api/scans/([0-9a-f-]+)(/samples|/export)?', path)
+                match = re.fullmatch(r'/api/scans/([0-9a-f-]+)(/samples|/export|/diagnostic)?', path)
                 if match:
                     scan = store.get(match[1])
+                    if match[2] == '/diagnostic':
+                        file = store.diagnostic_file(match[1])
+                        payload = file.read_bytes()
+                        self.send_headers(200, 'application/json; charset=utf-8', len(payload), filename=file.name)
+                        return self.wfile.write(payload)
                     if match[2] == '/samples':
                         return self.json(store.samples(match[1]))
                     if match[2] == '/export':
@@ -180,6 +218,8 @@ def create_app(data_path=None, *, lan=False, access_key=None):
                 self.json({'error': 'Not found.'}, 404)
             except LookupError as exc:
                 self.json({'error': str(exc)}, 404)
+            except ValueError as exc:
+                self.json({'error': str(exc)}, 400)
             except Exception as exc:
                 self.json({'error': str(exc)}, 500)
 
@@ -205,7 +245,18 @@ def create_app(data_path=None, *, lan=False, access_key=None):
                     if access:
                         access.logout(self.headers.get('Cookie'))
                     return self.json({'authenticated': False}, cookie='obdwhiz_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0')
+                if path == '/api/fleet/readers':
+                    return self.json(run(register_reader(body)))
+                if path == '/api/fleet/remove':
+                    if fleet.state['busyReader'] == body.get('address'):
+                        raise ValueError('Wait for this reader scan to finish before removing it.')
+                    return self.json(fleet.data.remove(body.get('address')))
+                if path == '/api/fleet/settings':
+                    result = fleet.configure(body)
+                    return self.json(result)
                 if path == '/api/bluetooth/power':
+                    if body.get('powered') is False and fleet.data.settings()['enabled'] and fleet.data.readers():
+                        raise ValueError('Pause automatic fleet scanning before turning the radio off.')
                     if adapter.state['connected']:
                         raise ValueError('Disconnect the receiver before changing the Pi Bluetooth radio.')
                     return self.json(run(bluetooth.power(body.get('controller'), body.get('powered'))))
@@ -224,9 +275,11 @@ def create_app(data_path=None, *, lan=False, access_key=None):
                 if path == '/api/connect':
                     return self.json(run(connect(body)))
                 if path == '/api/initialize':
+                    if fleet.manual_task and not fleet.manual_task.done():
+                        raise ValueError('The connection scan is running automatically. Wait for it to finish.')
                     return self.json(run(adapter.initialize(body)))
                 if path == '/api/disconnect':
-                    return self.json(run(adapter.disconnect()))
+                    return self.json(run(manual_disconnect()))
                 if path == '/api/poll':
                     return self.json(run(adapter.polling(body)))
                 if path == '/api/scan':
@@ -283,6 +336,7 @@ def main():
         httpd = ThreadingHTTPServer(('0.0.0.0' if args.lan else '127.0.0.1', args.port), handler)
     except OSError as exc:
         sys.exit(f'Cannot start OBDWhiz: {exc}. Use --port to select an unused port.')
+    run(adapter.fleet.start())
     print(f'OBDWhiz ready on port {args.port} ({"LAN; access key required" if args.lan else "localhost only"})', flush=True)
     if args.open:
         webbrowser.open(f'http://localhost:{args.port}')
@@ -291,6 +345,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        run(adapter.fleet.close())
         run(adapter.bluetooth.close())
         run(adapter.disconnect())
         httpd.server_close()

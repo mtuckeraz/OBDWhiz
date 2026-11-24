@@ -1,10 +1,11 @@
 'use strict';
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
-const state = { status: null, bluetooth: null, scans: [], vehicles: [], selected: null, devices: [], definitions: [], busy: false, lastScanSignature: '', view: 'workspace', authenticated: false };
+const state = { status: null, bluetooth: null, fleet: null, fleetEvents: [], fleetCursor: null, scans: [], vehicles: [], selected: null, devices: [], definitions: [], busy: false, lastScanSignature: '', view: 'workspace', authenticated: false };
 const escapeHTML = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const E = escapeHTML;
 const date = (v) => v ? new Date(v).toLocaleString(undefined, {dateStyle:'medium', timeStyle:'short'}) : '';
+const fleetDate = (v) => v ? new Date(v).toLocaleString(undefined, {year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',timeZoneName:'short'}) : '';
 const safeURL = (v) => {try {const u = new URL(v); return ['http:','https:'].includes(u.protocol) ? u.href : '#';} catch {return '#';}};
 let toastTimer, fileMode, refreshRunning = false;
 
@@ -35,7 +36,7 @@ function view(name) {
   if (!document.getElementById(name)?.classList.contains('view')) name='workspace';
   state.view=name; $$('.view').forEach(el=>el.classList.toggle('active',el.id===name));
   $$('.nav').forEach(el=>el.classList.toggle('active',el.dataset.view===name));
-  $('#view-name').textContent = ({workspace:'Overview',connection:'Adapter & vehicle',library:'OEM reference library',adaptations:'Adaptation planner',setup:'Setup'})[name];
+  $('#view-name').textContent = ({workspace:'Overview',connection:'Adapter & vehicle',fleet:'Fleet scans',library:'OEM reference library',adaptations:'Adaptation planner',setup:'Setup'})[name];
   history.replaceState(null,'','#'+name);
 }
 document.addEventListener('click',e=>{const target=e.target.closest('[data-view]');if(target)view(target.dataset.view);});
@@ -59,15 +60,15 @@ function renderStatus() {
   $('#adapter-detail').textContent=a.device || 'Carista EVO · direct Bluetooth';
   $('#ai-summary').textContent=ai.configured?'Available':'Not configured';
   $('#vehicle-count').textContent=state.vehicles.filter(v=>!v.demo).length;
-  const sessions=state.scans.filter(s=>!s.demo).length;
+  const sessions=state.vehicles.filter(g=>!g.demo).reduce((n,g)=>n+(g.totalScanCount||g.scans.length),0);
   $('#session-count').textContent=`${sessions} saved scan session${sessions===1?'':'s'}`;
-  $('#initialize').disabled=state.busy || !a.connected || a.polling;
+  $('#initialize').disabled=state.busy || !a.connected || a.polling || state.status.automaticScan?.manualPending;
   $('#disconnect').disabled=state.busy || !a.connected;
   $('#discover').disabled=state.busy || a.connected || state.bluetooth?.pairing.status==='pairing';
   $('#scan-button').disabled=state.busy || !a.ready;
   $('#start-poll').disabled=state.busy || !a.ready || !a.scanId || a.polling;
   $('#stop-poll').disabled=state.busy || !a.polling;
-  $('#adapter-message').textContent=a.error || (a.ready ? `${(a.identity||'').replace(/[\r\n]+/g,' ')} · Protocol ${a.protocol} · ${Object.keys(a.supported).length} responding ECU(s)` : a.connected?(a.profile || 'Connected. Select endpoints and initialize diagnostics.'):'Waiting for an adapter.');
+  $('#adapter-message').textContent=state.status.automaticScan?.manualPending?'Connected. Initializing and saving a code scan automatically…':a.error || (a.ready ? `${(a.identity||'').replace(/[\r\n]+/g,' ')} · Protocol ${a.protocol} · ${Object.keys(a.supported).length} responding ECU(s)` : a.connected?(a.profile || 'Connected. Automatic code scan will start shortly.'):'Waiting for an adapter.');
   $('#adapter-message').classList.toggle('error-text',!!a.error);
   $('#endpoints').hidden=!a.connected || a.transport!=='ble';
   if(a.connected && a.transport==='ble') {
@@ -104,8 +105,23 @@ function renderDevices() {
   if($('#device-list').dataset.signature===signature)return;
   $('#device-list').dataset.signature=signature;
   const disabled=state.busy || state.status?.adapter.connected || state.bluetooth?.pairing.status==='pairing';
-  $('#device-list').innerHTML=state.devices.map((d,i)=>`<div class="device"><div><strong>${E(d.name)}${d.saved?' · Saved receiver':''}</strong><p>${E(d.transport==='ble'?'Bluetooth LE':'Serial')} · ${E(d.id)}${d.rssi!=null?' · '+E(d.rssi)+' dBm':''}</p><p>${E(d.hint||'')}${d.paired?' · Paired':''}${d.trusted?' · Remembered by Pi':''}</p>${d.uuids?.length?`<details><summary>Advertised services</summary><p>${d.uuids.map(E).join('<br>')}</p></details>`:''}</div><div class="receiver-actions">${state.bluetooth?.available&&d.transport==='ble'?`<button class="button secondary" data-pair="${i}" ${disabled?'disabled':''}>${d.paired?'Pair again':'Pair'}</button>`:''}<button class="button secondary" data-device="${i}" ${disabled?'disabled':''}>Connect</button></div></div>`).join('')||'<p class="muted">Discover nearby receivers, then choose your own OBD adapter.</p>';
+  $('#device-list').innerHTML=state.devices.map((d,i)=>`<div class="device"><div><strong>${E(d.name)}${d.saved?' · Saved receiver':''}</strong><p>${E(d.transport==='ble'?'Bluetooth LE':'Serial')} · ${E(d.id)}${d.rssi!=null?' · '+E(d.rssi)+' dBm':''}</p><p>${E(d.hint||'')}${d.paired?' · Paired':''}${d.trusted?' · Remembered by Pi':''}</p>${d.uuids?.length?`<details><summary>Advertised services</summary><p>${d.uuids.map(E).join('<br>')}</p></details>`:''}</div><div class="receiver-actions">${state.bluetooth?.available&&d.transport==='ble'?`<button class="button secondary" data-fleet="${i}" ${disabled?'disabled':''}>Add to fleet</button><button class="button secondary" data-pair="${i}" ${disabled?'disabled':''}>Pair (optional)</button>`:''}<button class="button secondary" data-device="${i}" ${disabled?'disabled':''}>Connect & scan</button></div></div>`).join('')||'<p class="muted">Discover nearby receivers, then choose your own OBD adapter.</p>';
 }
+function renderFleet() {
+  const f=state.fleet;if(!f)return;
+  $('#fleet-count').textContent=`${f.readers.length} / ${f.capacity} fleet readers`;
+  $('#fleet-toggle').textContent=f.settings.enabled?'Pause automatic scans':'Resume automatic scans';
+  $('#fleet-worker').textContent=!f.settings.enabled?'Paused':f.busyReader?'Scanning '+f.busyReader:f.running?'Monitoring':'Waiting for service';
+  $('#fleet-error').textContent=[f.lastError,...Object.values(f.radioErrors||{})].filter(Boolean).join(' · ');
+  if(document.activeElement!==$('#fleet-interval'))$('#fleet-interval').value=f.settings.scanIntervalSeconds;
+  const signature=JSON.stringify(f.readers);
+  if($('#fleet-readers').dataset.signature!==signature){$('#fleet-readers').dataset.signature=signature;$('#fleet-readers').innerHTML=f.readers.map(r=>`<article class="fleet-reader"><div class="panel-heading"><strong>${E(r.label)}</strong><span class="badge ${r.lastError?'amber':r.scanFresh?'':'neutral'}">${r.scanFresh?'Fresh scan':E(r.lastScanStatus)}${r.lastCodeCount!=null?' · '+r.lastCodeCount+' code(s)':''}</span></div><p class="muted small">${E(r.address)} · ${E(r.presence)}${r.vin?' · VIN '+E(r.vin):' · VIN awaiting vehicle response'}</p><p class="muted small">Last scan: ${r.lastScanAt?E(fleetDate(r.lastScanAt)):'Not yet captured'}${r.lastScanAgeSeconds!=null?' · '+Math.round(r.lastScanAgeSeconds)+' seconds ago':''}</p>${r.lastError?`<p class="error-text">${E(r.lastError)}</p>`:''}<div class="actions">${r.lastScanId?`<a class="button secondary" href="/api/scans/${E(r.lastScanId)}/diagnostic">Diagnostic file</a>`:''}<button class="text-button" data-remove-reader="${E(r.address)}">Remove reader</button></div></article>`).join('')||'<p class="muted">Discover receivers in Adapter & vehicle, then Add to fleet. A manual connection also registers a Carista and starts its first scan automatically.</p>';}
+  const events=state.fleetEvents.slice(-40).reverse();
+  $('#fleet-events').innerHTML=events.map(e=>`<div class="fleet-event"><strong>${E(e.type.replaceAll('_',' '))}${e.code?' · '+E(e.code):''}</strong><span class="muted small">${E(fleetDate(e.createdAt))} · ${E(e.address||'Fleet monitor')}${e.ecu?' · ECU '+E(e.ecu):''}${e.status?' · '+E(e.status):''}</span>${e.error?`<p class="error-text">${E(e.error)}</p>`:''}${e.scanId?`<a href="/api/scans/${E(e.scanId)}/diagnostic">Download dated diagnostic file</a>`:''}</div>`).join('')||'<p class="muted">Fleet events appear here as readers are detected and scanned.</p>';
+}
+$('#fleet-toggle').addEventListener('click',e=>action(e.target,async()=>{await api('/fleet/settings',{enabled:!state.fleet.settings.enabled});}));
+$('#fleet-interval').addEventListener('change',async e=>{try{await api('/fleet/settings',{scanIntervalSeconds:Number(e.target.value)});await refresh();}catch(error){toast(error.message,true);}});
+$('#fleet-readers').addEventListener('click',e=>{const b=e.target.closest('[data-remove-reader]');if(b)action(b,async()=>{await api('/fleet/remove',{address:b.dataset.removeReader});toast('Reader removed from automatic scans. Diagnostic history was retained.');});});
 function renderBluetooth() {
   const b=state.bluetooth;if(!b)return;
   $('#pi-bluetooth').hidden=!b.available;
@@ -193,11 +209,12 @@ function renderScan() {
 async function refresh() {
   if(refreshRunning || !state.authenticated)return;refreshRunning=true;
   try {
-    const [status,vehicles,bluetooth]=await Promise.all([api('/status'),api('/vehicles'),api('/bluetooth')]);
+    const [status,vehicles,bluetooth,fleet,events]=await Promise.all([api('/status'),api('/vehicles'),api('/bluetooth'),api('/fleet'),api('/fleet/events?limit=100'+(state.fleetCursor==null?'':'&after='+state.fleetCursor))]);
     const scans=vehicles.flatMap(v=>v.scans);
     state.status=status;state.scans=scans;state.vehicles=vehicles;state.bluetooth=bluetooth;
+    state.fleet=fleet;state.fleetEvents=[...state.fleetEvents,...events.events].slice(-200);state.fleetCursor=events.nextCursor;
     if(bluetooth.available)state.devices=[...bluetooth.devices,...state.devices.filter(d=>d.transport==='serial')];
-    renderStatus();renderHistory();renderBluetooth();renderDevices();
+    renderStatus();renderHistory();renderBluetooth();renderDevices();renderFleet();
     if($('#adapter-trace-panel').open)$('#adapter-trace').textContent=JSON.stringify(await api('/adapter/trace'),null,2);
     if(state.selected) {
       const entry=scans.find(s=>s.id===state.selected.id);
@@ -214,10 +231,11 @@ $('#discover').addEventListener('click',e=>action(e.target,async()=>{
   $('#discovery-note').textContent=result.warning || `${result.devices.length} receiver(s) found. Match the name and address to your own adapter. Pair if required; many BLE receivers can connect directly.`;
   renderDevices();
 }));
-$('#device-list').addEventListener('click',e=>{const b=e.target.closest('[data-device],[data-pair]');if(!b)return;action(b,async()=>{
-  const d=state.devices[Number(b.dataset.device??b.dataset.pair)];
+$('#device-list').addEventListener('click',e=>{const b=e.target.closest('[data-device],[data-pair],[data-fleet]');if(!b)return;action(b,async()=>{
+  const d=state.devices[Number(b.dataset.device??b.dataset.pair??b.dataset.fleet)];
+  if(b.hasAttribute('data-fleet')){await api('/fleet/readers',{address:d.id,controller:state.bluetooth.controller,name:d.name,label:d.name});toast('Reader added. The Pi will connect, scan and save dated files automatically.');view('fleet');return;}
   if(b.hasAttribute('data-pair')){await api('/bluetooth/pair',{id:d.id});toast('Pairing started. Complete any PIN or confirmation below.');}
-  else {await api('/connect',{...d,baud:Number($('#baud').value)});toast('Receiver connected and saved. Initialize diagnostics to verify its ELM identity.');}
+  else {await api('/connect',{...d,baud:Number($('#baud').value)});toast('Receiver connected. Code scanning and dated diagnostic files are automatic.');}
 });});
 $('#initialize').addEventListener('click',e=>action(e.target,async()=>{await api('/initialize',{tx:Number($('#tx').value),rx:Number($('#rx').value)});toast('Standard OBD capabilities discovered. Ready to scan.');}));
 $('#disconnect').addEventListener('click',e=>action(e.target,async()=>{await api('/disconnect',{});toast('Adapter disconnected.');}));

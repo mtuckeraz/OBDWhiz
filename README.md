@@ -34,11 +34,11 @@ cd "$HOME/OBDWhiz" && git pull --ff-only && bash install-pi.sh --service
 
 ### Install from an archive
 
-Copy `obdwhiz-pi-0.3.0.tar.gz` and its `.sha256` file from this project's `output` directory to your Pi. In a Pi terminal, as your normal user:
+Copy `obdwhiz-pi-0.4.0.tar.gz` and its `.sha256` file from this project's `output` directory to your Pi. In a Pi terminal, as your normal user:
 
 ```bash
-sha256sum -c obdwhiz-pi-0.3.0.tar.gz.sha256
-tar -xzf obdwhiz-pi-0.3.0.tar.gz
+sha256sum -c obdwhiz-pi-0.4.0.tar.gz.sha256
+tar -xzf obdwhiz-pi-0.4.0.tar.gz
 cd obdwhiz
 bash install-pi.sh
 ```
@@ -90,7 +90,7 @@ Disable automatic startup with `sudo systemctl disable --now obdwhiz`. Re-run `b
 3. Open **Adapter & vehicle**. Select the Pi Bluetooth radio and turn it on if needed. The installer already starts Bluetooth and grants the service device permissions.
 4. Click **Discover receivers**. Match the receiver name, Bluetooth address, signal strength and advertised services to your own adapter. A name alone is not proof that a device is an OBD receiver.
 5. Click **Pair** if your receiver requires bonding. Enter the receiver's PIN/passkey or confirm its displayed code in the web interface. Pairing never depends on a Pi desktop agent. Cancel a pending request on the same page if needed. Many BLE receivers can use **Connect** directly without pairing.
-6. Click **Connect**, review the UART endpoints and **Initialize diagnostics**. ELM identity is checked before vehicle reads. The last connected receiver is remembered locally; paired receivers remain paired in BlueZ across restarts.
+6. Click **Connect & scan**. Carista initialization, ELM identity validation and the first dated code scan run automatically. Or choose **Add to fleet** for background connection and repeated scans. The last connected receiver is remembered locally; paired receivers remain paired in BlueZ across restarts.
 
 The supported wireless diagnostic path is **Bluetooth LE with an ELM-compatible UART**, including the Carista EVO profile. Bluetooth Classic/SPP-only receivers are not provided a new wireless transport by this release; use supported BLE hardware or an enumerated serial connection. The browser does not connect to the receiver itself.
 
@@ -115,13 +115,48 @@ If setup needs attention:
 - No EVO: check ignition, range, adapter power, and that another app is not connected. Use the web interface for pairing when required; BLE does not require creating a serial port or opening Pi Bluetooth Settings.
 - Persistent Pi Bluetooth/Wi-Fi interference: try Ethernet or 5 GHz Wi-Fi; see [Bleak's Raspberry Pi troubleshooting](https://bleak.readthedocs.io/en/stable/troubleshooting.html).
 
+## Automatic fleet diagnostics
+
+The Pi supports **10 enrolled Carista EVO readers**, managed under **Fleet scans**. Discover a receiver in **Adapter & vehicle**, then select **Add to fleet**. A successful manual **Connect & scan** also enrolls the reader when capacity is available and immediately initializes diagnostics and saves a code scan. Pairing is optional for many BLE readers; failed bonding does not mean direct BLE connection is unsupported. Other apps must release the receiver.
+
+The service runs a presence monitor and a single fair scan worker after boot; no browser, desktop session, or logged-in SSH user is required. Only enrolled readers are monitored automatically. Readers take turns, so ten vehicles do not require ten simultaneous Bluetooth links. The default minimum interval is **5 seconds per reader**, with actual frequency limited by initialization, scan duration and the other queued readers. Sleeping/unavailable vehicles retry after **30 seconds**. Pause/resume or change the interval in the browser. In-flight reads finish before a pause takes effect.
+
+Each automatic connection reads the VIN, monitor evidence and standard stored/pending/permanent codes (modes 03, 07 and 0A), plus supply voltage. These frequent scans skip the slower live-PID/freezeframe collection; the full manual scan remains available. A captured VIN binds the reader to its vehicle. A later VIN mismatch is recorded as a failed attempt rather than relabeling another vehicle. Missing/unsupported replies remain explicit coverage gaps.
+
+Every real scan is saved in SQLite and as an immutable, UTC-datestamped JSON file:
+
+```text
+.local/diagnostics/YYYY-MM-DD/VIN-or-reader_YYYY-MM-DDTHH-MM-SS.microsecondsZ_scan-id.json
+```
+
+Files include raw evidence, ECU/mode coverage, reader identity and automatic trigger. Failed attempts get separately labeled files and events; they are never an all-clear scan and do not create fake vehicle cards. File-write failures retain the SQLite record and pending snapshot for recovery on restart. Existing different diagnostic files are preserved and reported. Vehicle edits and later research do not rewrite the original evidence file. Diagnostic files, reader registrations, events and access keys are private and excluded from GitHub/release archives.
+
+Bluetooth advertisements establish visits. A **90-second** signal gap is recorded as `departure_inferred`, with the latest successful scan reference; the Pi cannot distinguish departure from sleep, interference, unplugging or another app taking the reader. A new advertisement after that gap starts a new visit and requests a fresh scan. Service restarts and pauses re-establish presence rather than inventing departures during downtime. The Pi cannot guarantee a fresh scan after a car is out of range.
+
+Code history records **first observed** and **no longer reported** timestamps. These are sampling times, not the ECU's exact fault-creation time. A code is only marked no longer reported when the same ECU returns a positive response for the same mode; an absent/unsupported ECU does not clear a code. Per-mode read timestamps and full scan start/completion times are retained to show the observation window.
+
+The following authenticated APIs are ready for the future maintenance dashboard or an LED controller:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/fleet` | Registered readers, presence, last result, errors and `scanFresh` |
+| `POST /api/fleet/readers` | Enroll/update a discovered reader with label, optional VIN and vehicle context |
+| `POST /api/fleet/remove` | Stop monitoring a reader while retaining all diagnostic history |
+| `POST /api/fleet/settings` | Enable/pause, minimum interval, retry delay and presence timeout |
+| `GET /api/fleet/events?after=0&limit=100` | Durable event stream with an increasing `nextCursor`; omit `after` for recent events |
+| `GET /api/scans/SCAN_ID/diagnostic` | Download the original dated JSON diagnostic file |
+
+`scanFresh` means a successful/partial scan within 60 seconds while present, with no current error. It **does not** mean no faults, full OEM coverage, roadworthiness or clearance to leave. GPIO/LED wiring and maintenance alerts are not implemented. Automatic fleet scans do not call AI research or incur provider charges. The existing manual/import research controls remain available.
+
+Continuous logging grows the data directory. No diagnostic history is automatically deleted. The worker pauses if free disk space drops below **256 MB**. The normal vehicle overview loads the latest 50 scans per VIN and shows total counts; all records remain in SQLite, dated files and the event API for dashboard/history work.
+
 ## Windows (secondary)
 
 Requires Windows 10/11, Python 3.11+ and working Bluetooth. Double-click **Start-Apex.cmd**, or run `Start-Apex.ps1`. The legacy launcher name remains for compatibility; it installs the Python libraries in a Windows `.venv`, starts OBDWhiz and opens a browser. Linux system packages and the Pi installer are not used on Windows.
 
 ## Build a distributable Pi archive
 
-From this source directory, run `python tools/build_release.py` (or `.venv/bin/python tools/build_release.py` on Linux). This creates `output/obdwhiz-pi-0.3.0.tar.gz` plus a SHA-256 checksum. Shell scripts are packaged with Linux line endings and executable permissions.
+From this source directory, run `python tools/build_release.py` (or `.venv/bin/python tools/build_release.py` on Linux). This creates `output/obdwhiz-pi-0.4.0.tar.gz` plus a SHA-256 checksum. Shell scripts are packaged with Linux line endings and executable permissions.
 
 The archive uses an explicit source-file allowlist. It includes the application, installer, launchers, Bluetooth checker, tests and documentation. It excludes `.env`, `.local`, scan history/VINs, `.venv`, caches, screenshots and previous output. Installation downloads dependencies; this is not an offline image. Rebuilding replaces the same versioned archive.
 
@@ -176,7 +211,7 @@ Selecting a vehicle fills the make, model, year, trim, drivetrain, VIN and power
 
 Open **Setup**, enter an OpenAI API key, choose a model that supports Responses API web search (default `gpt-5-mini`), and apply. Keys entered through the UI live in server memory until restart. Alternatively copy `.env.example` to `.env`, set `OPENAI_API_KEY`, and restart. `.env` is ignored by Git and contains plaintext secrets if you use it; keep it private.
 
-Automatic research is enabled by default once a key is supplied. Every real scan/import with codes starts one billable research job when none is active; otherwise its report records that research could not start. You can turn automatic research off in Setup. Manual **Research codes** reruns incur another provider request. Demo scans never call the provider. AI is not locally installed or included in a ChatGPT subscription.
+Automatic research is enabled by default once a key is supplied. Every manual scan/import with codes starts one billable research job when none is active; otherwise its report records that research could not start. You can turn automatic research off in Setup. Manual **Research codes** reruns incur another provider request. Demo scans never call the provider. AI is not locally installed or included in a ChatGPT subscription.
 
 Each research request includes the first 30 codes, up to 30 snapshot readings, vehicle context, symptoms, scan warnings and exact matching imported references. VIN, adapter addresses, complete history and raw frames are omitted. Provider response storage is disabled with `store: false`; provider retention policies still apply. Scan information in free-text symptoms/references is supplied as written, so avoid inserting unrelated sensitive data there.
 

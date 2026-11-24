@@ -41,7 +41,7 @@ ExecStart={quoted(str(root / '.venv/bin/python'), executable=True)} {quoted(str(
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGINT
-TimeoutStopSec=30
+TimeoutStopSec=60
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true

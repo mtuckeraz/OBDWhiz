@@ -1,6 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 import unittest
+from unittest.mock import AsyncMock, patch
 from core.adapter import Adapter
 
 
@@ -13,6 +14,22 @@ class FakeClient:
 
 
 class AdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_transient_bluez_failure_refreshes_the_device_on_the_same_radio(self):
+        address = 'AA:BB:CC:DD:EE:FF'
+        device = SimpleNamespace(address=address, details={'path': '/org/bluez/hci1/dev_AA_BB_CC_DD_EE_FF'})
+        fresh = SimpleNamespace(address=address, details=device.details)
+        first = SimpleNamespace(connect=AsyncMock(side_effect=RuntimeError('org.bluez.Error.InProgress')), disconnect=AsyncMock())
+        second = SimpleNamespace(connect=AsyncMock(), disconnect=AsyncMock())
+        adapter = Adapter(lambda s: s, lambda *a: None)
+        with patch('bleak.BleakClient', side_effect=[first, second]) as clients, \
+                patch('bleak.BleakScanner.find_device_by_address', new=AsyncMock(return_value=fresh)) as discovery, \
+                patch('core.adapter.sys.platform', 'linux'):
+            result = await adapter.connect_ble(device)
+        self.assertIs(result, fresh)
+        discovery.assert_awaited_once_with(address, timeout=8, bluez={'adapter': 'hci1'})
+        self.assertEqual(clients.call_count, 2)
+        first.disconnect.assert_awaited_once()
+
     async def test_mutating_commands_rejected_at_transport_boundary(self):
         adapter = Adapter(lambda s: s, lambda *a: None)
         for command in ('04', '2701', '2EF1900000', '1101', 'ATSH7E0', '010C\r04'):
