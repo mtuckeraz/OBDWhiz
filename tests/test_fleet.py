@@ -159,6 +159,20 @@ class FleetEngineTests(unittest.IsolatedAsyncioTestCase):
         self.fleet.devices[(reader['address'], RADIO)] = SimpleNamespace(address=reader['address'])
         return reader
 
+    async def test_advertisement_callback_passes_the_real_bleak_validator_and_binds_its_radio(self):
+        from bleak.backends.scanner import BaseBleakScanner
+        reader = self.enroll()
+        self.fleet.readers = {reader['address']: reader}
+        self.fleet.seen.clear()
+        self.fleet.pending_seen.clear()
+        device = SimpleNamespace(address=reader['address'])
+        for radio in ('/org/bluez/hci1', RADIO):
+            native = SimpleNamespace(_ad_callbacks={})
+            BaseBleakScanner.register_detection_callback(native, self.fleet.advertisement_callback(radio))
+            for callback in native._ad_callbacks.values():
+                callback(device, SimpleNamespace())
+            self.assertEqual(reader['address'] in self.fleet.pending_seen, radio == RADIO)
+
     async def test_ten_readers_take_turns_without_overlapping_connections(self):
         readers = [self.enroll(n) for n in range(10)]
         await asyncio.gather(*(self.fleet.scan_one(reader, 'continuous') for reader in readers))

@@ -2,6 +2,7 @@
 import asyncio
 import contextlib
 import datetime as dt
+from functools import partial
 import sys
 import shutil
 import time
@@ -95,6 +96,10 @@ class Fleet:
         self.seen[address] = time.monotonic()
         self.pending_seen[address] = utcnow()
 
+    def advertisement_callback(self, controller):
+        # Bleak validates an exact two-parameter callable, including defaults.
+        return partial(self.detect, controller)
+
     async def watch(self):
         from bleak import BleakScanner
         try:
@@ -131,7 +136,7 @@ class Fleet:
                             if ADAPTER not in self.bluetooth.objects.get(controller, {}):
                                 raise ValueError('Registered Pi Bluetooth radio is unavailable.')
                             await self.bluetooth.set_property(controller, ADAPTER, 'Powered', 'b', True)
-                        scanner = BleakScanner(detection_callback=lambda d, a, c=controller: self.detect(c, d, a),
+                        scanner = BleakScanner(detection_callback=self.advertisement_callback(controller),
                                                bluez={'adapter': controller.rsplit('/', 1)[-1]})
                         await asyncio.wait_for(scanner.start(), timeout=20)
                         self.scanners[controller] = scanner

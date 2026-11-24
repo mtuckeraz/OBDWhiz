@@ -34,11 +34,11 @@ cd "$HOME/OBDWhiz" && git pull --ff-only && bash install-pi.sh --service
 
 ### Install from an archive
 
-Copy `obdwhiz-pi-0.4.0.tar.gz` and its `.sha256` file from this project's `output` directory to your Pi. In a Pi terminal, as your normal user:
+Copy `obdwhiz-pi-0.4.1.tar.gz` and its `.sha256` file from this project's `output` directory to your Pi. In a Pi terminal, as your normal user:
 
 ```bash
-sha256sum -c obdwhiz-pi-0.4.0.tar.gz.sha256
-tar -xzf obdwhiz-pi-0.4.0.tar.gz
+sha256sum -c obdwhiz-pi-0.4.1.tar.gz.sha256
+tar -xzf obdwhiz-pi-0.4.1.tar.gz
 cd obdwhiz
 bash install-pi.sh
 ```
@@ -156,7 +156,7 @@ Requires Windows 10/11, Python 3.11+ and working Bluetooth. Double-click **Start
 
 ## Build a distributable Pi archive
 
-From this source directory, run `python tools/build_release.py` (or `.venv/bin/python tools/build_release.py` on Linux). This creates `output/obdwhiz-pi-0.4.0.tar.gz` plus a SHA-256 checksum. Shell scripts are packaged with Linux line endings and executable permissions.
+From this source directory, run `python tools/build_release.py` (or `.venv/bin/python tools/build_release.py` on Linux). This creates `output/obdwhiz-pi-0.4.1.tar.gz` plus a SHA-256 checksum. Shell scripts are packaged with Linux line endings and executable permissions.
 
 The archive uses an explicit source-file allowlist. It includes the application, installer, launchers, Bluetooth checker, tests and documentation. It excludes `.env`, `.local`, scan history/VINs, `.venv`, caches, screenshots and previous output. Installation downloads dependencies; this is not an offline image. Rebuilding replaces the same versioned archive.
 
