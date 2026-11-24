@@ -37,7 +37,7 @@ User={user}
 Group={group}
 SupplementaryGroups=bluetooth dialout
 WorkingDirectory={working_directory(str(root))}
-ExecStart={quoted(str(root / '.venv/bin/python'), executable=True)} {quoted(str(root / 'server.py'), executable=True)}
+ExecStart={quoted(str(root / '.venv/bin/python'), executable=True)} {quoted(str(root / 'server.py'), executable=True)} --lan
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGINT

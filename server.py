@@ -1,4 +1,4 @@
-"""OBDWhiz Pi diagnostic workbench. Python 3.11+; HTTP bound to loopback only."""
+"""OBDWhiz Pi workbench with optional authenticated local-network access."""
 import argparse
 import asyncio
 import concurrent.futures
@@ -8,6 +8,7 @@ import mimetypes
 import os
 from pathlib import Path
 import re
+import socket
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,6 +24,8 @@ for line in (ROOT / '.env').read_text(encoding='utf-8').splitlines() if (ROOT / 
 
 from core import obd
 from core.adapter import Adapter
+from core.access import BrowserAccess, load_access_key
+from core.bluetooth import Bluetooth
 from core.research import Research
 from core.store import Store
 
@@ -40,13 +43,35 @@ def demo():
             'research': {'status': 'demo', 'text': 'This is a sample workspace. Connect the adapter and scan a real vehicle to research its codes. A code describes a detected condition; it does not establish which component caused it.'}}
 
 
-def create_app(data_path=None):
+def create_app(data_path=None, *, lan=False, access_key=None):
+    if lan and not access_key:
+        raise ValueError('LAN mode requires an access key.')
+    access = BrowserAccess(access_key) if lan else None
+    hostname = socket.gethostname().lower()
+    bluetooth = Bluetooth((Path(data_path).parent if data_path else ROOT / '.local') / 'receiver.json')
     store = Store(data_path or ROOT / '.local' / 'apex.sqlite3')
     research = Research(store)
     loop = asyncio.new_event_loop()
     thread = threading.Thread(target=loop.run_forever, daemon=True, name='obdwhiz-bluetooth')
     thread.start()
     adapter = Adapter(store.save_scan, store.samples)
+    adapter.bluetooth = bluetooth
+
+    async def bluetooth_status():
+        status = await bluetooth.snapshot()
+        if status['available']:
+            bluetooth.cache_devices(adapter)
+        return status
+
+    async def discover(spec):
+        return await bluetooth.discover(adapter, spec.get('controller')) if sys.platform == 'linux' else await adapter.devices()
+
+    async def connect(spec):
+        if bluetooth.task and not bluetooth.task.done():
+            raise ValueError('Finish or cancel pairing before connecting.')
+        result = await adapter.connect(spec)
+        bluetooth.remember(spec)
+        return result
 
     def run(coroutine):
         future = asyncio.run_coroutine_threadsafe(coroutine, loop)
@@ -68,7 +93,7 @@ def create_app(data_path=None):
         return result
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = 'OBDWhiz/0.2'
+        server_version = 'OBDWhiz/0.3'
 
         def log_message(self, fmt, *args):
             # Avoid logging imported data or provider keys.
@@ -77,19 +102,26 @@ def create_app(data_path=None):
 
         def allowed(self, write=False):
             expected = {f'localhost:{self.server.server_port}', f'127.0.0.1:{self.server.server_port}'}
-            if self.headers.get('Host', '') not in expected:
-                self.json({'error': 'Only the local OBDWhiz hostname is allowed.'}, 403)
+            if lan:
+                names = {hostname, hostname if hostname.endswith('.local') else hostname + '.local', self.connection.getsockname()[0]}
+                expected.update(f'{name}:{self.server.server_port}' for name in names)
+            if self.headers.get('Host', '').lower() not in expected:
+                self.json({'error': 'Use this Pi hostname or IP address to open OBDWhiz.'}, 403)
                 return False
             origin = self.headers.get('Origin')
             if origin and origin not in {f'http://{host}' for host in expected}:
                 self.json({'error': 'Cross-origin access is blocked.'}, 403)
                 return False
             if self.headers.get('Sec-Fetch-Site') == 'cross-site' or (write and self.headers.get('X-Apex-Client') != '1'):
-                self.json({'error': 'Use the local OBDWhiz interface.'}, 403)
+                self.json({'error': 'Use the OBDWhiz web interface.'}, 403)
+                return False
+            path = urlparse(self.path).path
+            if access and path.startswith('/api/') and path not in ('/api/login', '/api/session') and not access.allowed(self.headers.get('Cookie')):
+                self.json({'error': 'Sign in with the Pi access key.', 'authenticationRequired': True}, 401)
                 return False
             return True
 
-        def send_headers(self, status, content_type, length):
+        def send_headers(self, status, content_type, length, cookie=None):
             self.send_response(status)
             self.send_header('Content-Type', content_type)
             self.send_header('Content-Length', str(length))
@@ -97,11 +129,13 @@ def create_app(data_path=None):
             self.send_header('X-Content-Type-Options', 'nosniff')
             self.send_header('Referrer-Policy', 'no-referrer')
             self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+            if cookie:
+                self.send_header('Set-Cookie', cookie)
             self.end_headers()
 
-        def json(self, data, status=200):
+        def json(self, data, status=200, cookie=None):
             body = json.dumps(data, ensure_ascii=False).encode('utf-8')
-            self.send_headers(status, 'application/json; charset=utf-8', len(body))
+            self.send_headers(status, 'application/json; charset=utf-8', len(body), cookie)
             self.wfile.write(body)
 
         def do_GET(self):
@@ -109,10 +143,14 @@ def create_app(data_path=None):
                 return
             path = urlparse(self.path).path
             try:
+                if path == '/api/session':
+                    return self.json({'required': lan, 'authenticated': not access or access.allowed(self.headers.get('Cookie'))})
+                if path == '/api/bluetooth':
+                    return self.json(run(bluetooth_status()))
                 if path == '/api/status':
                     dependencies = {name: importlib.util.find_spec(name) is not None for name in ('bleak', 'serial')}
                     return self.json({'adapter': dict(adapter.state), 'ai': research.config(), 'dependencies': dependencies,
-                                      'catalog': obd.catalog(), 'localOnly': True,
+                                      'catalog': obd.catalog(), 'localOnly': not lan,
                                       'platform': sys.platform, 'installHint': INSTALL_HINT})
                 if path == '/api/scans':
                     return self.json(store.list())
@@ -155,10 +193,35 @@ def create_app(data_path=None):
                 if not isinstance(body, dict):
                     raise ValueError('Expected a JSON object.')
                 path = urlparse(self.path).path
+                if path == '/api/login':
+                    if not access:
+                        return self.json({'authenticated': True})
+                    token = access.login(body.get('key'), self.client_address[0])
+                    if not token:
+                        return self.json({'error': 'The access key is incorrect.'}, 401)
+                    return self.json({'authenticated': True}, cookie=f'obdwhiz_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={access.lifetime}')
+                if path == '/api/logout':
+                    if access:
+                        access.logout(self.headers.get('Cookie'))
+                    return self.json({'authenticated': False}, cookie='obdwhiz_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0')
+                if path == '/api/bluetooth/power':
+                    if adapter.state['connected']:
+                        raise ValueError('Disconnect the receiver before changing the Pi Bluetooth radio.')
+                    return self.json(run(bluetooth.power(body.get('controller'), body.get('powered'))))
+                if path == '/api/bluetooth/pair':
+                    if adapter.state['connected']:
+                        raise ValueError('Disconnect the receiver before pairing.')
+                    return self.json(run(bluetooth.start_pair(body.get('id'))))
+                if path == '/api/bluetooth/answer':
+                    return self.json(run(bluetooth.answer(body.get('promptId'), body.get('value'))))
+                if path == '/api/bluetooth/cancel':
+                    return self.json(run(bluetooth.cancel()))
                 if path == '/api/discover':
-                    return self.json(run(adapter.devices()))
+                    if adapter.state['connected']:
+                        raise ValueError('Disconnect the receiver before discovering adapters.')
+                    return self.json(run(discover(body)))
                 if path == '/api/connect':
-                    return self.json(run(adapter.connect(body)))
+                    return self.json(run(connect(body)))
                 if path == '/api/initialize':
                     return self.json(run(adapter.initialize(body)))
                 if path == '/api/disconnect':
@@ -211,13 +274,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--port', type=int, default=8787)
     parser.add_argument('--open', action='store_true')
+    parser.add_argument('--lan', action='store_true', help='Allow local-network browsers using a private access key')
     args = parser.parse_args()
-    handler, adapter, run, loop, store = create_app()
+    key = load_access_key(ROOT / '.local/access.key') if args.lan else None
+    handler, adapter, run, loop, store = create_app(lan=args.lan, access_key=key)
     try:
-        httpd = ThreadingHTTPServer(('127.0.0.1', args.port), handler)
+        httpd = ThreadingHTTPServer(('0.0.0.0' if args.lan else '127.0.0.1', args.port), handler)
     except OSError as exc:
         sys.exit(f'Cannot start OBDWhiz: {exc}. Use --port to select an unused port.')
-    print(f'OBDWhiz ready at http://localhost:{args.port} (local HTTP only)', flush=True)
+    print(f'OBDWhiz ready on port {args.port} ({"LAN; access key required" if args.lan else "localhost only"})', flush=True)
     if args.open:
         webbrowser.open(f'http://localhost:{args.port}')
     try:
@@ -225,6 +290,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        run(adapter.bluetooth.close())
         run(adapter.disconnect())
         httpd.server_close()
         loop.call_soon_threadsafe(loop.stop)

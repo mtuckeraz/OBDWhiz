@@ -26,6 +26,7 @@ jobs:
       - name: Check launchers and browser script
         run: |
           systemd-analyze --version
+          dbus-daemon --version
           bash -n install-pi.sh
           bash -n Start-OBDWhiz.sh
           bash install-pi.sh --help

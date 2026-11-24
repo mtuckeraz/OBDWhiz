@@ -1,7 +1,7 @@
 'use strict';
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
-const state = { status: null, scans: [], vehicles: [], selected: null, devices: [], definitions: [], busy: false, lastScanSignature: '', view: 'workspace' };
+const state = { status: null, bluetooth: null, scans: [], vehicles: [], selected: null, devices: [], definitions: [], busy: false, lastScanSignature: '', view: 'workspace', authenticated: false };
 const escapeHTML = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const E = escapeHTML;
 const date = (v) => v ? new Date(v).toLocaleString(undefined, {dateStyle:'medium', timeStyle:'short'}) : '';
@@ -12,9 +12,18 @@ function toast(message, error=false) { const el = $('#toast'); el.textContent = 
 async function api(path, body) {
   const response = await fetch('/api' + path, body === undefined ? {} : {method:'POST', headers:{'Content-Type':'application/json','X-Apex-Client':'1'}, body:JSON.stringify(body)});
   const data = await response.json();
+  if(response.status===401 && path!=='/login')showLogin();
   if (!response.ok) throw new Error(data.error || 'Request failed');
   return data;
 }
+function showLogin() {state.authenticated=false;document.body.classList.add('signed-out');$('#login-screen').hidden=false;$('#sign-out').hidden=true;}
+function signedIn(required) {state.authenticated=true;document.body.classList.remove('signed-out');$('#login-screen').hidden=true;$('#sign-out').hidden=!required;}
+$('#login-form').addEventListener('submit',async e=>{
+  e.preventDefault();const b=$('#login-form button');b.disabled=true;
+  try {await api('/login',{key:$('#access-key').value});$('#access-key').value='';$('#login-error').textContent='';signedIn(true);await refresh();await loadDefinitions();}
+  catch(error){$('#login-error').textContent=error.message;}finally{b.disabled=false;}
+});
+$('#sign-out').addEventListener('click',async()=>{await api('/logout',{});localStorage.removeItem('apex-vehicle');location.reload();});
 async function action(button, task) {
   if (state.busy) return;
   state.busy = true;
@@ -54,7 +63,7 @@ function renderStatus() {
   $('#session-count').textContent=`${sessions} saved scan session${sessions===1?'':'s'}`;
   $('#initialize').disabled=state.busy || !a.connected || a.polling;
   $('#disconnect').disabled=state.busy || !a.connected;
-  $('#discover').disabled=state.busy || a.connected;
+  $('#discover').disabled=state.busy || a.connected || state.bluetooth?.pairing.status==='pairing';
   $('#scan-button').disabled=state.busy || !a.ready;
   $('#start-poll').disabled=state.busy || !a.ready || !a.scanId || a.polling;
   $('#stop-poll').disabled=state.busy || !a.polling;
@@ -90,6 +99,40 @@ function renderStatus() {
   $('#dependency-status').textContent=Object.values(dependencies).every(Boolean)?'Python Bluetooth LE and serial libraries are installed.':'Bluetooth libraries are missing. '+state.status.installHint;
   if(document.activeElement!==$('#ai-model') && !$('#ai-form').dataset.dirty) {$('#ai-model').value=ai.model;$('#auto-research').checked=ai.autoResearch;}
 }
+function renderDevices() {
+  const signature=JSON.stringify([state.devices,state.status?.adapter.connected,state.bluetooth?.pairing.status,state.busy]);
+  if($('#device-list').dataset.signature===signature)return;
+  $('#device-list').dataset.signature=signature;
+  const disabled=state.busy || state.status?.adapter.connected || state.bluetooth?.pairing.status==='pairing';
+  $('#device-list').innerHTML=state.devices.map((d,i)=>`<div class="device"><div><strong>${E(d.name)}${d.saved?' · Saved receiver':''}</strong><p>${E(d.transport==='ble'?'Bluetooth LE':'Serial')} · ${E(d.id)}${d.rssi!=null?' · '+E(d.rssi)+' dBm':''}</p><p>${E(d.hint||'')}${d.paired?' · Paired':''}${d.trusted?' · Remembered by Pi':''}</p>${d.uuids?.length?`<details><summary>Advertised services</summary><p>${d.uuids.map(E).join('<br>')}</p></details>`:''}</div><div class="receiver-actions">${state.bluetooth?.available&&d.transport==='ble'?`<button class="button secondary" data-pair="${i}" ${disabled?'disabled':''}>${d.paired?'Pair again':'Pair'}</button>`:''}<button class="button secondary" data-device="${i}" ${disabled?'disabled':''}>Connect</button></div></div>`).join('')||'<p class="muted">Discover nearby receivers, then choose your own OBD adapter.</p>';
+}
+function renderBluetooth() {
+  const b=state.bluetooth;if(!b)return;
+  $('#pi-bluetooth').hidden=!b.available;
+  $('#bluetooth-error').textContent=b.error||'';
+  const signature=JSON.stringify(b.controllers);
+  if($('#bluetooth-controller').dataset.signature!==signature){$('#bluetooth-controller').innerHTML=b.controllers.map(c=>`<option value="${E(c.id)}">${E(c.name)} · ${E(c.address)} · ${c.powered?'On':'Off'}</option>`).join('');$('#bluetooth-controller').value=b.controller||'';$('#bluetooth-controller').dataset.signature=signature;}
+  const radio=b.controllers.find(c=>c.id===$('#bluetooth-controller').value);
+  $('#bluetooth-controller').disabled=state.busy || state.status?.adapter.connected || b.pairing.status==='pairing';
+  $('#bluetooth-power').textContent=radio?.powered?'Turn Bluetooth off':'Turn Bluetooth on';
+  $('#bluetooth-power').disabled=state.busy || state.status?.adapter.connected || b.pairing.status==='pairing' || !radio;
+  $('#bluetooth-status').textContent=radio?.powered?'Pi radio is on':'Pi radio is off';
+  $('#saved-receiver').textContent=b.selected?`Saved receiver: ${b.selected.name||b.selected.id} · ${b.selected.id}`:'';
+  const pairing=b.pairing,p=pairing.prompt;
+  $('#pairing-panel').hidden=pairing.status==='idle';
+  $('#pairing-status').textContent=pairing.error || (pairing.status==='paired'?'Receiver paired. Choose Connect to use it.':pairing.status==='cancelled'?'Pairing cancelled.':`Pairing ${pairing.device||'receiver'}…`);
+  $('#pair-cancel').hidden=pairing.status!=='pairing';
+  $('#pair-submit').hidden=!p || p.kind==='display';
+  $('#pairing-input-label').hidden=!p || !['pin','passkey'].includes(p.kind);
+  $('#pairing-instructions').textContent=!p?'If your receiver asks for a PIN or confirmation, it will appear here.':p.kind==='pin'?'Enter the PIN from the receiver label or manual.':p.kind==='passkey'?'Enter the numeric passkey requested by the receiver.':p.kind==='display'?`Enter ${p.passkey} on the receiver.`:`Confirm this is your receiver${p.passkey?' and its code is '+p.passkey:''}${p.service?' (service '+p.service+')':''}.`;
+  $('#pair-submit').textContent=p?.kind==='confirm'?'Confirm receiver':'Send PIN / passkey';
+  if($('#pairing-form').dataset.prompt!==(p?.id||'')){$('#pairing-input').value='';$('#pairing-form').dataset.prompt=p?.id||'';}
+  renderDevices();
+}
+$('#bluetooth-controller').addEventListener('change',renderBluetooth);
+$('#bluetooth-power').addEventListener('click',e=>action(e.target,async()=>{const id=$('#bluetooth-controller').value;const radio=state.bluetooth.controllers.find(c=>c.id===id);state.bluetooth=await api('/bluetooth/power',{controller:id,powered:!radio.powered});renderBluetooth();}));
+$('#pairing-form').addEventListener('submit',async e=>{e.preventDefault();const p=state.bluetooth?.pairing.prompt;if(!p)return;try{await api('/bluetooth/answer',{promptId:p.id,value:p.kind==='confirm'?true:$('#pairing-input').value});$('#pairing-input').value='';await refresh();}catch(error){toast(error.message,true);}});
+$('#pair-cancel').addEventListener('click',async()=>{try{await api('/bluetooth/cancel',{});await refresh();}catch(error){toast(error.message,true);}});
 function renderHistory() {
   const signature=JSON.stringify([state.vehicles.map(g=>[g.key,g.vehicle,g.scans.map(s=>[s.id,s.codes.length]),g.lastScanAt]),state.selected?.id]);
   if($('#scan-list').dataset.signature===signature)return;
@@ -148,11 +191,13 @@ function renderScan() {
 }
 
 async function refresh() {
-  if(refreshRunning)return;refreshRunning=true;
+  if(refreshRunning || !state.authenticated)return;refreshRunning=true;
   try {
-    const [status,vehicles]=await Promise.all([api('/status'),api('/vehicles')]);
+    const [status,vehicles,bluetooth]=await Promise.all([api('/status'),api('/vehicles'),api('/bluetooth')]);
     const scans=vehicles.flatMap(v=>v.scans);
-    state.status=status;state.scans=scans;state.vehicles=vehicles;renderStatus();renderHistory();
+    state.status=status;state.scans=scans;state.vehicles=vehicles;state.bluetooth=bluetooth;
+    if(bluetooth.available)state.devices=[...bluetooth.devices,...state.devices.filter(d=>d.transport==='serial')];
+    renderStatus();renderHistory();renderBluetooth();renderDevices();
     if($('#adapter-trace-panel').open)$('#adapter-trace').textContent=JSON.stringify(await api('/adapter/trace'),null,2);
     if(state.selected) {
       const entry=scans.find(s=>s.id===state.selected.id);
@@ -165,12 +210,14 @@ async function refresh() {
 }
 $('#discover').addEventListener('click',e=>action(e.target,async()=>{
   $('#discovery-note').textContent='Scanning nearby Bluetooth LE devices for 6 seconds…';
-  const result=await api('/discover',{});state.devices=result.devices;
-  $('#discovery-note').textContent=result.warning || `${result.devices.length} device(s) found. Select your own Carista adapter.`;
-  $('#device-list').innerHTML=result.devices.map((d,i)=>`<div class="device"><div><strong>${E(d.name)}</strong><p>${E(d.transport==='ble'?'Bluetooth LE':'Serial')} · ${E(d.id)}${d.rssi?' · '+E(d.rssi)+' dBm':''}</p></div><button class="button secondary" data-device="${i}">Connect</button></div>`).join('')||'<p class="muted">No adapters found. Check Bluetooth is enabled, ignition and range.</p>';
+  const result=await api('/discover',{controller:state.bluetooth?.available?$('#bluetooth-controller').value:undefined});state.devices=result.devices;
+  $('#discovery-note').textContent=result.warning || `${result.devices.length} receiver(s) found. Match the name and address to your own adapter. Pair if required; many BLE receivers can connect directly.`;
+  renderDevices();
 }));
-$('#device-list').addEventListener('click',e=>{const b=e.target.closest('[data-device]');if(!b)return;action(b,async()=>{
-  const d=state.devices[Number(b.dataset.device)];await api('/connect',{...d,baud:Number($('#baud').value)});toast('Adapter connected. Check endpoints, then initialize.');
+$('#device-list').addEventListener('click',e=>{const b=e.target.closest('[data-device],[data-pair]');if(!b)return;action(b,async()=>{
+  const d=state.devices[Number(b.dataset.device??b.dataset.pair)];
+  if(b.hasAttribute('data-pair')){await api('/bluetooth/pair',{id:d.id});toast('Pairing started. Complete any PIN or confirmation below.');}
+  else {await api('/connect',{...d,baud:Number($('#baud').value)});toast('Receiver connected and saved. Initialize diagnostics to verify its ELM identity.');}
 });});
 $('#initialize').addEventListener('click',e=>action(e.target,async()=>{await api('/initialize',{tx:Number($('#tx').value),rx:Number($('#rx').value)});toast('Standard OBD capabilities discovered. Ready to scan.');}));
 $('#disconnect').addEventListener('click',e=>action(e.target,async()=>{await api('/disconnect',{});toast('Adapter disconnected.');}));
@@ -226,6 +273,5 @@ $('#tire-form').addEventListener('submit',e=>{e.preventDefault();try{const old=t
 
 try{const v=JSON.parse(localStorage.getItem('apex-vehicle')||'null');if(v)fillVehicle(v,v.vin);}catch{}
 view(location.hash.slice(1)||'workspace');
-refresh().then(async()=>{const latest=[...state.scans].sort((a,b)=>Number(a.demo)-Number(b.demo)||b.createdAt.localeCompare(a.createdAt))[0];if(latest && !state.selected)await selectScan(latest.id,false);}).catch(e=>toast(e.message,true));
-loadDefinitions().catch(()=>{});
+api('/session').then(async session=>{if(!session.authenticated){showLogin();return;}signedIn(session.required);await refresh();await loadDefinitions();const latest=[...state.scans].sort((a,b)=>Number(a.demo)-Number(b.demo)||b.createdAt.localeCompare(a.createdAt))[0];if(latest && !state.selected)await selectScan(latest.id,false);}).catch(e=>toast(e.message,true));
 setInterval(refresh,2000);

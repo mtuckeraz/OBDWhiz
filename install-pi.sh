@@ -28,7 +28,7 @@ fi
 
 printf 'Installing Python, BlueZ, D-Bus, Bluetooth tools, and CA certificates...\n'
 sudo apt-get update
-sudo apt-get install -y python3 python3-venv python3-pip bluez bluetooth dbus rfkill ca-certificates
+sudo apt-get install -y python3 python3-venv python3-pip bluez bluetooth dbus rfkill ca-certificates avahi-daemon
 python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else "Python 3.11+ is required. Use Raspberry Pi OS Bookworm or newer.")'
 python3 - "$(bluetoothctl --version)" <<'PY'
 import re
@@ -39,6 +39,7 @@ if not match or tuple(map(int, match.groups())) < (5, 55):
 PY
 sudo usermod -aG bluetooth,dialout "$(id -un)"
 sudo systemctl enable --now bluetooth.service
+sudo systemctl enable --now avahi-daemon.service
 sudo rfkill unblock bluetooth
 if ! bluetoothctl power on; then
   printf 'Warning: Bluetooth could not be powered on. Check the controller after logging in again.\n' >&2
@@ -50,6 +51,7 @@ python3 -m venv .venv
 .venv/bin/python -m pip check
 .venv/bin/python -c 'import bleak, serial; import bleak.backends.bluezdbus.client'
 chmod +x Start-OBDWhiz.sh install-pi.sh
+.venv/bin/python tools/configure_access.py > /dev/null
 
 if "$service"; then
   unit_dir="$(mktemp -d)"
@@ -70,9 +72,11 @@ if ! .venv/bin/python tools/check_bluetooth.py; then
 fi
 printf '\nOBDWhiz installed. Log out and back in to apply Bluetooth/serial group membership.\n'
 if "$service"; then
-  printf 'The boot service is running with the new groups. Open http://localhost:8787 on the Pi.\n'
+  printf 'The boot service is running with the new groups. Open http://%s.local:8787 from your phone or laptop.\n' "$(hostname -s)"
 else
-  printf 'Then run: bash Start-OBDWhiz.sh --open\n'
+  printf 'Then run: bash Start-OBDWhiz.sh --lan\n'
 fi
+printf '\nBrowser access key (share only with your users):\n'
+.venv/bin/python tools/configure_access.py
 printf 'Bluetooth scan check: .venv/bin/python tools/check_bluetooth.py --scan\n'
-printf 'For a browser on another computer, use the SSH tunnel described in README.md.\n'
+printf 'After installation, Bluetooth power, discovery, pairing and PIN entry are available in the web interface.\n'

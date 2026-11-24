@@ -1,12 +1,12 @@
 # OBDWhiz — Raspberry Pi diagnostic workbench
 
-A local diagnostic application primarily packaged for **Raspberry Pi 4 (8 GB)**, with a direct **Carista EVO → Pi Bluetooth → OBDWhiz** workflow. The Python server, SQLite history and Bluetooth connection run on the Pi. Open the interface on the Pi's desktop or through an SSH tunnel from another computer. AI research uses an external API; no local AI model is required.
+A local diagnostic application primarily packaged for **Raspberry Pi 4 (8 GB)**, with a direct **Carista EVO → Pi Bluetooth → OBDWhiz** workflow. The Python server, SQLite history and Bluetooth connection run on the Pi. Open the web interface from a phone or laptop on the same local network. Receiver setup, Bluetooth power, pairing PINs and confirmations are handled in the browser; users do not need the Pi desktop or SSH. AI research uses an external API; no local AI model is required.
 
-The interface uses **HTTP at http://localhost:8787**, bound only to 127.0.0.1. No browser Bluetooth support, phone bridge or certificate installation is needed. Windows remains a secondary supported launch path.
+The installed Pi service uses **HTTP on port 8787** in authenticated LAN mode. Open `http://YOUR_PI_HOSTNAME.local:8787` (or the Pi's IP address) and sign in with the access key printed during installation. No browser Bluetooth support or phone Bluetooth pairing is needed. Windows remains a secondary supported launch path.
 
 ## Install on Raspberry Pi
 
-Use **Raspberry Pi OS 64-bit, Bookworm or newer**, Python **3.11+**, BlueZ **5.55+**, working Bluetooth, and internet access for installation. Pi OS with Desktop lets you open a browser directly on the Pi; Lite works with the SSH tunnel below. Keep the Pi within Bluetooth range of the vehicle.
+Use **Raspberry Pi OS 64-bit, Bookworm or newer**, Python **3.11+**, BlueZ **5.55+**, working Bluetooth, and internet access for installation. Both Pi OS Lite and Desktop work; the application runs without a desktop session. Keep the Pi within Bluetooth range of the vehicle.
 
 ### One-command install from GitHub
 
@@ -16,7 +16,7 @@ Run this in a Pi terminal as your normal user (not root):
 sudo apt-get update && sudo apt-get install -y git && git clone https://github.com/mtuckeraz/OBDWhiz.git "$HOME/OBDWhiz" && bash "$HOME/OBDWhiz/install-pi.sh" --service
 ```
 
-This installs Git, clones the public repository into `~/OBDWhiz`, installs all Python and Bluetooth dependencies, and starts OBDWhiz now and at boot. The destination must not already exist. Open **http://localhost:8787** on the Pi once setup finishes. For a browser on another computer, use the SSH tunnel below. Log out/in before doing manual Bluetooth checks so your new device groups take effect; the service receives them immediately.
+This installs Git, clones the public repository into `~/OBDWhiz`, installs all Python and Bluetooth dependencies, and starts OBDWhiz now and at boot. The destination must not already exist. The installer prints the LAN web address and a private browser access key. Share those with your users. The boot service immediately receives Bluetooth permissions, so users can complete receiver setup through the web interface without logging into the Pi. Only the installing owner needs the terminal. Log out/in only if you will run optional manual Bluetooth checks from that terminal.
 
 To update an existing GitHub installation, preserve `.local` and `.env` and run:
 
@@ -28,11 +28,11 @@ If Git reports local source changes, resolve them before updating; the command d
 
 ### Install from an archive
 
-Copy `obdwhiz-pi-0.2.0.tar.gz` and its `.sha256` file from this project's `output` directory to your Pi. In a Pi terminal, as your normal user:
+Copy `obdwhiz-pi-0.3.0.tar.gz` and its `.sha256` file from this project's `output` directory to your Pi. In a Pi terminal, as your normal user:
 
 ```bash
-sha256sum -c obdwhiz-pi-0.2.0.tar.gz.sha256
-tar -xzf obdwhiz-pi-0.2.0.tar.gz
+sha256sum -c obdwhiz-pi-0.3.0.tar.gz.sha256
+tar -xzf obdwhiz-pi-0.3.0.tar.gz
 cd obdwhiz
 bash install-pi.sh
 ```
@@ -43,20 +43,20 @@ The installer explicitly installs:
 
 | Layer | Dependencies / setup |
 | --- | --- |
-| Pi OS packages | `python3`, `python3-venv`, `python3-pip`, `bluez`, `bluetooth`, `dbus`, `rfkill`, `ca-certificates` |
+| Pi OS packages | `python3`, `python3-venv`, `python3-pip`, `bluez`, `bluetooth`, `dbus`, `rfkill`, `ca-certificates`, `avahi-daemon` |
 | Python virtual environment | `bleak==3.0.2`, `pyserial==3.5` and their transitive dependencies, including Bleak's Linux D-Bus backend |
 | Bluetooth startup | Enables and starts `bluetooth.service`, unblocks Bluetooth and requests controller power-on |
 | Device permissions | Adds the installing user to `bluetooth` and `dialout` without replacing existing groups |
 
 Python packages are installed in `.venv`, as required by [modern Raspberry Pi OS](https://www.raspberrypi.com/documentation/computers/os.html). Bleak uses [BlueZ over D-Bus on Linux](https://bleak.readthedocs.io/en/stable/backends/linux.html). There is no need to install a separate Python OBD library or use browser Web Bluetooth.
 
-**Log out and back in after installing** to apply device group membership. Then:
+For the manual launcher only, **log out and back in after installing** to apply device group membership. The boot service applies its groups immediately and does not require a desktop login. To launch manually:
 
 ```bash
-bash Start-OBDWhiz.sh --open
+bash Start-OBDWhiz.sh --lan
 ```
 
-Keep the terminal open; stop with Ctrl+C. Omit `--open` for terminal-only operation. Use `bash Start-OBDWhiz.sh --port 8788 --open` if needed. A Windows `.venv` cannot be reused on Linux: transfer the clean release archive, not the Windows environment.
+Keep the terminal open; stop with Ctrl+C. Read the installation key with `.venv/bin/python tools/configure_access.py`. For localhost-only development, omit `--lan` and optionally pass `--open`. Use `--port 8788` if needed. A Windows `.venv` cannot be reused on Linux: transfer the clean release archive, not the Windows environment.
 
 ### Optional automatic startup
 
@@ -66,7 +66,7 @@ To install dependencies and enable OBDWhiz at boot:
 bash install-pi.sh --service
 ```
 
-The installer validates the generated service using `systemd-analyze verify` before installing it. The systemd service runs as the installing user, with Bluetooth and serial groups, and listens on localhost:8787. It starts the server without opening a browser or auto-connecting to a vehicle. Open the browser yourself and select the adapter. Avoid starting a second copy while the service is running.
+The installer validates the generated service using `systemd-analyze verify` before installing it. The systemd service runs as the installing user, with Bluetooth and serial groups, and listens on the local network on port 8787 with access-key authentication. It starts the server without opening a browser or auto-connecting to a vehicle. Open the web address from a phone/laptop, sign in and select the receiver. Avoid starting a second copy while the service is running.
 
 ```bash
 sudo systemctl status obdwhiz --no-pager
@@ -77,23 +77,28 @@ sudo systemctl stop obdwhiz
 
 Disable automatic startup with `sudo systemctl disable --now obdwhiz`. Re-run `bash install-pi.sh --service` after moving the app directory. The service uses SIGINT for normal application shutdown and a private file-creation mask for new scan/key files.
 
-### Access from another computer
+### Receiver setup in a phone/laptop browser
 
-For Pi OS Lite or a browser on your laptop, enable SSH on the Pi and run this on the computer with the browser (replace `YOUR_USER` and `PI_HOSTNAME`):
+1. Connect the phone/laptop to the Pi's local network and open `http://YOUR_PI_HOSTNAME.local:8787`. The installer enables Avahi for `.local` discovery; the Pi's LAN IP also works.
+2. Sign in with the access key the owner received from the installer. The key is saved privately in `.local/access.key` and survives reinstallation. Sessions expire after 12 hours or server restart; **Sign out** revokes the current session.
+3. Open **Adapter & vehicle**. Select the Pi Bluetooth radio and turn it on if needed. The installer already starts Bluetooth and grants the service device permissions.
+4. Click **Discover receivers**. Match the receiver name, Bluetooth address, signal strength and advertised services to your own adapter. A name alone is not proof that a device is an OBD receiver.
+5. Click **Pair** if your receiver requires bonding. Enter the receiver's PIN/passkey or confirm its displayed code in the web interface. Pairing never depends on a Pi desktop agent. Cancel a pending request on the same page if needed. Many BLE receivers can use **Connect** directly without pairing.
+6. Click **Connect**, review the UART endpoints and **Initialize diagnostics**. ELM identity is checked before vehicle reads. The last connected receiver is remembered locally; paired receivers remain paired in BlueZ across restarts.
 
-```bash
-ssh -N -L 8787:127.0.0.1:8787 YOUR_USER@PI_HOSTNAME
-```
+The supported wireless diagnostic path is **Bluetooth LE with an ELM-compatible UART**, including the Carista EVO profile. Bluetooth Classic/SPP-only receivers are not provided a new wireless transport by this release; use supported BLE hardware or an enumerated serial connection. The browser does not connect to the receiver itself.
 
-Keep SSH running and open **http://localhost:8787** on that computer. Port 8787 must be free on the browser computer. Bluetooth and saved data still live on the Pi. Direct browsing to the Pi's network IP is not supported; the application's loopback binding and Host/Origin protections remain enabled.
+The installed service uses `--lan` by default. Run `server.py` without `--lan` for localhost-only development. If you prefer SSH forwarding instead of LAN access, run the server in localhost-only mode and forward port 8787 with `ssh -N -L 8787:127.0.0.1:8787 YOUR_USER@PI_HOSTNAME`.
 
-### Check Bluetooth
+### Optional owner Bluetooth diagnostics
+
+These terminal checks are for the owner when diagnosing hardware problems; normal users set up receivers entirely in the web interface.
 
 ```bash
 .venv/bin/python tools/check_bluetooth.py --scan
 ```
 
-This checks Python dependencies, BlueZ version, the Bluetooth service, controller power and a six-second BLE discovery as the current user. It reports counts without printing device addresses. Successful discovery does not establish a working Carista diagnostic session; use **Discover adapters → Connect → Initialize diagnostics** with the adapter powered and vehicle ignition on.
+This checks Python dependencies, BlueZ version, the Bluetooth service, controller power and a six-second BLE discovery as the current user. It reports counts without printing device addresses. Successful discovery does not establish a working Carista diagnostic session; use **Discover receivers → Connect → Initialize diagnostics** with the adapter powered and vehicle ignition on.
 
 If setup needs attention:
 
@@ -101,7 +106,7 @@ If setup needs attention:
 - Permission denied: log out/in after installation; check `id -nG` includes `bluetooth` and `dialout`. The boot service applies these groups immediately.
 - Bluetooth off: run `sudo rfkill unblock bluetooth`, `sudo systemctl enable --now bluetooth`, then `bluetoothctl power on`.
 - No controller: check `bluetoothctl list` and Pi boot settings; ensure Bluetooth has not been disabled.
-- No EVO: check ignition, range, adapter power, and that another app is not connected. BLE does not require creating a serial port or pairing through the desktop first.
+- No EVO: check ignition, range, adapter power, and that another app is not connected. Use the web interface for pairing when required; BLE does not require creating a serial port or opening Pi Bluetooth Settings.
 - Persistent Pi Bluetooth/Wi-Fi interference: try Ethernet or 5 GHz Wi-Fi; see [Bleak's Raspberry Pi troubleshooting](https://bleak.readthedocs.io/en/stable/troubleshooting.html).
 
 ## Windows (secondary)
@@ -110,7 +115,7 @@ Requires Windows 10/11, Python 3.11+ and working Bluetooth. Double-click **Start
 
 ## Build a distributable Pi archive
 
-From this source directory, run `python tools/build_release.py` (or `.venv/bin/python tools/build_release.py` on Linux). This creates `output/obdwhiz-pi-0.2.0.tar.gz` plus a SHA-256 checksum. Shell scripts are packaged with Linux line endings and executable permissions.
+From this source directory, run `python tools/build_release.py` (or `.venv/bin/python tools/build_release.py` on Linux). This creates `output/obdwhiz-pi-0.3.0.tar.gz` plus a SHA-256 checksum. Shell scripts are packaged with Linux line endings and executable permissions.
 
 The archive uses an explicit source-file allowlist. It includes the application, installer, launchers, Bluetooth checker, tests and documentation. It excludes `.env`, `.local`, scan history/VINs, `.venv`, caches, screenshots and previous output. Installation downloads dependencies; this is not an offline image. Rebuilding replaces the same versioned archive.
 
@@ -119,7 +124,7 @@ For upgrades, stop OBDWhiz and back up `.local` and your private `.env` before r
 ## Connect and scan
 
 1. Plug in the Carista EVO, turn the ignition on and keep the Pi within Bluetooth range. Close Carista or other apps that are using the adapter.
-2. Open **Adapter & vehicle → Discover adapters** and select your adapter. Discovery includes Bluetooth LE advertisements and available operating-system serial ports.
+2. Open **Adapter & vehicle → Discover receivers** and select your adapter. Discovery includes Bluetooth LE advertisements and available operating-system serial ports.
 3. For BLE, OBDWhiz automatically selects the **Carista EVO UART pair verified on your adapter**: service `000018f0-0000-1000-8000-00805f9b34fb`, TX `00002af1-0000-1000-8000-00805f9b34fb`, RX `00002af0-0000-1000-8000-00805f9b34fb`. Handles are discovered dynamically. Other adapters use a suggested writable/notifying pair that you must confirm. Initialization validates an ELM-compatible identity before vehicle reads.
 4. If the EVO exposes a Bluetooth serial profile, configure the serial connection in your operating system first, then select its port (for example /dev/ttyUSB0 on Linux or an outgoing COM port on Windows) and baud rate. BLE is the primary path; serial availability depends on the hardware. Do not select unrelated devices or COM ports.
 5. Click **Initialize diagnostics**. OBDWhiz sets ELM auto protocol selection, enables headers, checks for responding OBD ECUs and reads supported PID bitmaps.
@@ -209,7 +214,7 @@ The example URL above is a placeholder, not an OEM database. No licensed definit
 
 SQLite data lives in `.local/apex.sqlite3`. This legacy filename, the internal `X-Apex-Client` header and browser storage keys are retained to preserve existing installations; the application is named OBDWhiz. Up to 10,000 polling cycles are retained per scan; UI/JSON exports return the most recent 200. Scan snapshots and their request/response traces remain saved. The runtime adapter trace is bounded to 2,000 entries. Export JSON includes VIN/raw evidence, so review it before sharing.
 
-The server binds only to loopback, rejects unexpected Host/Origin headers, blocks cross-site requests, and requires a custom header for mutations. It does not expose keys through its API. HTML is escaped and report/source links are restricted to HTTP(S). No remote scripts, fonts or analytics are loaded. This is a single-user local tool; don't expose it through a public reverse proxy or router port forwarding. Use the SSH tunnel above for remote access.
+The installed service listens on the LAN and requires a shared access key for all private API routes, including Bluetooth operations, even from localhost. Static sign-in assets are public. Sessions use HttpOnly/SameSite cookies, failed sign-ins are rate limited, Host names are limited to the Pi hostname or the receiving interface address, cross-origin requests are blocked, and mutations require a custom header. It does not expose keys through its API. HTML is escaped and report/source links are restricted to HTTP(S). No remote scripts, fonts or analytics are loaded. This is a shared local workbench, not separate per-user accounts: signed-in users share receiver control and scan history. Use it on a trusted local network; HTTP does not encrypt traffic. Do not expose it through public router port forwarding. The access key and Bluetooth receiver preferences live under the ignored `.local` directory; pairing PINs are not saved by OBDWhiz.
 
 ## Validation
 
@@ -221,7 +226,7 @@ node --check web/app.js
 
 On Windows, use `.\.venv\Scripts\python.exe -m unittest discover -s tests -v`.
 
-The automated suite covers the application, Bluetooth setup checks, service generation and private-data exclusion from the archive. Linux CI also validates a generated unit with systemd's actual parser and verifies that it rejects the earlier quoted `WorkingDirectory` defect. This parser check is skipped on Windows. Both Pi shell scripts are checked with Bash, and the browser JavaScript is checked with `node --check`. Prior physical adapter verification was performed on Windows; Pi OS installation, systemd service execution and Pi-to-Carista communication still require validation on the actual Pi.
+The automated suite covers the application, LAN authentication and access controls, browser pairing API routes, PIN/passkey validation, receiver persistence, Bluetooth setup checks, service generation and private-data exclusion from the archive. Linux CI also validates a generated unit with systemd's actual parser and verifies that it rejects the earlier quoted `WorkingDirectory` defect. This parser check is skipped on Windows. Both Pi shell scripts are checked with Bash, and the browser JavaScript is checked with `node --check`. Prior physical adapter verification was performed on Windows; Pi OS installation, systemd service execution and Pi-to-Carista communication still require validation on the actual Pi.
 
 Tests also cover multi-ECU CAN frames, CAN DTC counts, ISO-TP VIN assembly, incomplete-frame rejection, 29-bit headers, legacy headers, signed readings, bitmap discovery, storage/schema validation, definition applicability, API isolation, read-only command boundaries, mocked AI source/citation handling, scan/poll lifecycles, vehicle sorting, VIN validation/grouping, mismatched VIN rejection and evidence-preserving context corrections. Earlier browser checks covered demo review, tire calculation, adapter discovery/connection, vehicle/session selection and responsive layout.
 
@@ -229,6 +234,8 @@ Tests also cover multi-ECU CAN frames, CAN DTC counts, ISO-TP VIN assembly, inco
 
 - [Carista: device and app compatibility](https://help.carista.com/hc/en-us/articles/360009856479-Which-devices-and-apps-work-with-Carista) — ELM app compatibility is not an EVO GATT specification.
 - [ELM Electronics: ELM327L datasheet](https://www.elmelectronics.com/wp-content/uploads/2016/07/ELM327L_Data_Sheet.pdf) — adapter commands and OBD framing.
+- [BlueZ: pairing agent API](https://bluez.readthedocs.io/en/latest/agent-api/) — application-owned pairing prompts.
+- [BlueZ: adapter API](https://bluez.readthedocs.io/en/latest/adapter-api/) — radio power and BLE discovery.
 - [Bleak: Linux backend](https://bleak.readthedocs.io/en/stable/backends/linux.html) — Pi/Linux BlueZ and D-Bus support.
 - [Bleak: Windows backend](https://bleak.readthedocs.io/en/stable/backends/windows.html) — secondary Windows BLE support.
 - [pySerial: port enumeration](https://pyserial.readthedocs.io/en/latest/tools.html) — COM port discovery.
