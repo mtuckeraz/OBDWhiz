@@ -137,7 +137,8 @@ class Fleet:
                                 raise ValueError('Registered Pi Bluetooth radio is unavailable.')
                             await self.bluetooth.set_property(controller, ADAPTER, 'Powered', 'b', True)
                         scanner = BleakScanner(detection_callback=self.advertisement_callback(controller),
-                                               bluez={'adapter': controller.rsplit('/', 1)[-1]})
+                                               bluez={'adapter': controller.rsplit('/', 1)[-1],
+                                                      'filters': {'DuplicateData': True}})
                         await asyncio.wait_for(scanner.start(), timeout=20)
                         self.scanners[controller] = scanner
                         self.state['radioErrors'].pop(controller, None)
