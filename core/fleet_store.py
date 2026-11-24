@@ -181,6 +181,7 @@ class FleetStore:
             return
         if not reader.get('vin') and scan.get('vin') and scan.get('vinSource') == 'obd':
             reader['vin'] = scan['vin']
+        reader['vehicle'] = dict(scan['vehicle'])
         reader.update(lastScanAt=scan['createdAt'], lastScanId=scan['id'],
                       lastCodeCount=len(scan['codes']), lastCodeCoverage=scan.get('codeCoverage', {}),
                       lastScanStatus='complete' if all(scan.get('codeCoverage', {}).get(m) for m in ('03', '07', '0A')) else 'partial',

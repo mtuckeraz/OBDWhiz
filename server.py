@@ -97,6 +97,18 @@ def create_app(data_path=None, *, lan=False, access_key=None):
         async with fleet.link_lock:
             return await adapter.disconnect()
 
+    async def initialize(spec):
+        async with fleet.link_lock:
+            return await adapter.initialize(spec)
+
+    async def manual_scan(vehicle):
+        async with fleet.link_lock:
+            return await adapter.scan(vehicle)
+
+    async def pair_reader(address):
+        async with fleet.link_lock:
+            return await bluetooth.start_pair(address)
+
     def run(coroutine):
         future = asyncio.run_coroutine_threadsafe(coroutine, loop)
         try:
@@ -263,7 +275,7 @@ def create_app(data_path=None, *, lan=False, access_key=None):
                 if path == '/api/bluetooth/pair':
                     if adapter.state['connected']:
                         raise ValueError('Disconnect the receiver before pairing.')
-                    return self.json(run(bluetooth.start_pair(body.get('id'))))
+                    return self.json(run(pair_reader(body.get('id'))))
                 if path == '/api/bluetooth/answer':
                     return self.json(run(bluetooth.answer(body.get('promptId'), body.get('value'))))
                 if path == '/api/bluetooth/cancel':
@@ -277,13 +289,13 @@ def create_app(data_path=None, *, lan=False, access_key=None):
                 if path == '/api/initialize':
                     if fleet.manual_task and not fleet.manual_task.done():
                         raise ValueError('The connection scan is running automatically. Wait for it to finish.')
-                    return self.json(run(adapter.initialize(body)))
+                    return self.json(run(initialize(body)))
                 if path == '/api/disconnect':
                     return self.json(run(manual_disconnect()))
                 if path == '/api/poll':
                     return self.json(run(adapter.polling(body)))
                 if path == '/api/scan':
-                    return self.json(auto(run(adapter.scan(body.get('vehicle', {})))))
+                    return self.json(auto(run(manual_scan(body.get('vehicle', {})))))
                 if path == '/api/import':
                     # Preserve OEM module names, status, raw evidence and definitions as supplied.
                     body['source'] = 'Imported scan'
@@ -295,7 +307,12 @@ def create_app(data_path=None, *, lan=False, access_key=None):
                     return self.json(store.import_definitions(body))
                 vehicle_match = re.fullmatch(r'/api/vehicles/([A-HJ-NPR-Z0-9]{17})', path)
                 if vehicle_match:
-                    return self.json(store.update_vehicle(vehicle_match[1], body.get('vehicle', {})))
+                    vehicle = store.update_vehicle(vehicle_match[1], body.get('vehicle', {}))
+                    for reader in fleet.data.readers():
+                        if reader.get('vin') == vehicle_match[1]:
+                            reader['vehicle'] = dict(vehicle['vehicle'])
+                            fleet.data.put(reader)
+                    return self.json(vehicle)
                 if path == '/api/settings':
                     model = body.get('model', research.model)
                     if not isinstance(model, str) or not re.fullmatch(r'[a-zA-Z0-9._-]{1,100}', model):

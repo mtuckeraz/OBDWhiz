@@ -63,9 +63,11 @@ class Fleet:
         if self.task or sys.platform != 'linux':
             return
         for reader in self.data.readers():
-            reader['presence'] = 'unknown'
             if reader['lastScanStatus'] == 'scanning':
-                reader.update(lastScanStatus='interrupted', lastError='Scan interrupted by service restart; waiting for reader.')
+                self.archive_failure(reader, 'Scan interrupted by service restart; no complete result.',
+                                     'service_restart', reader.get('lastAttemptAt'), [])
+                reader = self.data.reader(reader['address'])
+            reader['presence'] = 'unknown'
             self.data.put(reader)
         self.data.event(None, 'monitor_started', {'observation': 'Presence is re-established after restart; offline departures are not invented.'})
         self.state['running'] = True
@@ -232,6 +234,18 @@ class Fleet:
                 await self.manual_task
         self.manual_task = asyncio.create_task(self.scan_one(reader, 'manual_connection', connection_id=connection_id))
 
+    def archive_failure(self, reader, error, trigger, started, trace):
+        failed = self.store.save_scan({'vehicle': dict(reader.get('vehicle') or {}), 'codes': [],
+            'source': 'Automatic fleet scan attempt', 'scanStatus': 'failed',
+            'scope': 'Attempt failed; no all-clear result and no verified vehicle identity.',
+            'warnings': [str(error)], 'trace': list(trace),
+            'reader': {'address': reader['address'], 'label': reader['label']},
+            'automation': {'trigger': trigger, 'visitId': reader.get('visitId'), 'startedAt': started,
+                           'expectedVin': reader.get('vin'), 'kind': 'failed_attempt'}})
+        self.data.scan_failed(reader['address'], error, trigger)
+        self.data.event(reader['address'], 'failed_attempt_saved', {'scanId': failed['id'], 'diagnosticFile': failed.get('diagnosticFile')})
+        return failed
+
     async def scan_one(self, reader, trigger, connection_id=None):
         address = reader['address']
         async with self.link_lock:
@@ -276,7 +290,7 @@ class Fleet:
                         await session.initialize({}, discover_pids=False)
                     vehicle = dict(reader.get('vehicle') or {})
                     vehicle.setdefault('make', 'Unspecified')
-                    vehicle.setdefault('model', reader['label'])
+                    vehicle.setdefault('model', 'Connected vehicle')
                     if reader.get('vin'):
                         vehicle['vin'] = reader['vin']
                     return await session.scan(vehicle, codes_only=True)
@@ -284,18 +298,10 @@ class Fleet:
                 scan = await asyncio.wait_for(execute(), timeout=120)
                 self.data.scan_saved(address, scan, trigger)
             except asyncio.CancelledError:
-                self.data.scan_failed(address, 'Automatic scan interrupted; no complete result.', trigger)
+                self.archive_failure(reader, 'Automatic scan interrupted; no complete result.', trigger, started, session.trace)
                 raise
             except Exception as exc:
-                failed = self.store.save_scan({'vehicle': dict(reader.get('vehicle') or {}), 'codes': [],
-                    'source': 'Automatic fleet scan attempt', 'scanStatus': 'failed',
-                    'scope': 'Attempt failed; no all-clear result and no verified vehicle identity.',
-                    'warnings': [str(exc)], 'trace': list(session.trace),
-                    'reader': {'address': address, 'label': reader['label']},
-                    'automation': {'trigger': trigger, 'visitId': reader.get('visitId'), 'startedAt': started,
-                                   'expectedVin': reader.get('vin'), 'kind': 'failed_attempt'}})
-                self.data.scan_failed(address, exc, trigger)
-                self.data.event(address, 'failed_attempt_saved', {'scanId': failed['id'], 'diagnosticFile': failed.get('diagnosticFile')})
+                self.archive_failure(reader, exc, trigger, started, session.trace)
             finally:
                 session.save_scan = original_save
                 if not manual:

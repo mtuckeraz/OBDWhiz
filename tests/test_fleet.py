@@ -6,7 +6,7 @@ import tempfile
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 import uuid
 
 from core.adapter import Adapter
@@ -212,3 +212,43 @@ class FleetEngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.store.diagnostic_file(attempt['id']).exists())
         self.assertEqual(self.store.vehicles(), [])
         self.assertEqual(FakeReader.connected_count, 0)
+
+    async def test_cancelling_an_inflight_scan_saves_an_interrupted_attempt_and_releases_link(self):
+        reader = self.enroll()
+        entered = asyncio.Event()
+        async def waiting(*args, **kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+        with patch.object(FakeReader, 'scan', new=waiting):
+            task = asyncio.create_task(self.fleet.scan_one(reader, 'continuous'))
+            await asyncio.wait_for(entered.wait(), 2)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertEqual(FakeReader.connected_count, 0)
+        self.assertFalse(self.fleet.link_lock.locked())
+        attempts = self.store.list()
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[0]['scanStatus'], 'failed')
+        self.assertTrue(self.store.diagnostic_file(attempts[0]['id']).exists())
+
+    async def test_pause_and_resume_do_not_invent_departures(self):
+        reader = self.enroll()
+        self.fleet.configure({'enabled': False})
+        self.fleet.configure({'enabled': True})
+        self.fleet.presence_tick()
+        self.assertEqual(self.fleet.data.reader(reader['address'])['presence'], 'unknown')
+        self.assertFalse(any(e['type'] == 'departure_inferred' for e in self.fleet.data.events()['events']))
+
+    async def test_interrupted_attempt_is_archived_when_service_restarts(self):
+        reader = self.enroll()
+        self.fleet.data.scan_started(reader['address'], 'continuous')
+        with patch('core.fleet.sys.platform', 'linux'), \
+                patch.object(self.fleet, 'run', new=AsyncMock()), \
+                patch.object(self.fleet, 'watch', new=AsyncMock()):
+            await self.fleet.start()
+            await asyncio.sleep(0)
+        record = self.store.get(self.store.list()[0]['id'])
+        self.assertEqual(record['scanStatus'], 'failed')
+        self.assertEqual(record['automation']['trigger'], 'service_restart')
+        self.assertTrue(self.store.diagnostic_file(record['id']).exists())
