@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 from tools.build_release import build, FILES
-from tools.render_service import quoted, render
+from tools.render_service import quoted, render, working_directory
 
 
 class PackagingTests(unittest.TestCase):
@@ -42,6 +42,7 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(quoted('/home/pi/My "OBD" % $app', executable=True),
                          '"/home/pi/My \\"OBD\\" %% $$app"')
         unit = render('.', 'pi', 'pi')
+        self.assertIn(f'WorkingDirectory={Path.cwd()}\n', unit)
         self.assertIn('User=pi\n', unit)
         self.assertIn('SupplementaryGroups=bluetooth dialout', unit)
         self.assertIn('KillSignal=SIGINT', unit)
@@ -50,6 +51,13 @@ class PackagingTests(unittest.TestCase):
             render('.', 'pi\nUser=root', 'pi')
         with self.assertRaises(ValueError):
             quoted('/home/pi\nExecStart=bad')
+
+    def test_working_directory_is_literal_while_specifiers_are_escaped(self):
+        self.assertEqual(working_directory('/home/pi/My "OBD" % $app'),
+                         '/home/pi/My "OBD" %% $app')
+        for value in ('/home/pi\nExecStart=bad', '/home/pi\r', '/home/pi ', '/home/pi\\'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                working_directory(value)
 
 
 if __name__ == '__main__':

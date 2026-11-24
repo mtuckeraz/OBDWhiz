@@ -13,6 +13,14 @@ def quoted(value, *, executable=False):
     return f'"{value}"'
 
 
+def working_directory(value):
+    # Unlike ExecStart, WorkingDirectory does not strip shell-style quotes or
+    # backslash escapes. Only systemd specifiers need escaping here.
+    if any(ord(c) < 32 or ord(c) == 127 for c in value) or value != value.strip() or value.endswith('\\'):
+        raise ValueError('Unsupported control characters or trailing whitespace/backslash in service directory.')
+    return value.replace('%', '%%')
+
+
 def render(directory, user, group):
     for name in (user, group):
         if not re.fullmatch(r'[a-zA-Z_][a-zA-Z0-9_-]*\$?', name):
@@ -28,7 +36,7 @@ Type=simple
 User={user}
 Group={group}
 SupplementaryGroups=bluetooth dialout
-WorkingDirectory={quoted(str(root))}
+WorkingDirectory={working_directory(str(root))}
 ExecStart={quoted(str(root / '.venv/bin/python'), executable=True)} {quoted(str(root / 'server.py'), executable=True)}
 Restart=on-failure
 RestartSec=5

@@ -66,7 +66,7 @@ To install dependencies and enable OBDWhiz at boot:
 bash install-pi.sh --service
 ```
 
-The systemd service runs as the installing user, with Bluetooth and serial groups, and listens on localhost:8787. It starts the server without opening a browser or auto-connecting to a vehicle. Open the browser yourself and select the adapter. Avoid starting a second copy while the service is running.
+The installer validates the generated service using `systemd-analyze verify` before installing it. The systemd service runs as the installing user, with Bluetooth and serial groups, and listens on localhost:8787. It starts the server without opening a browser or auto-connecting to a vehicle. Open the browser yourself and select the adapter. Avoid starting a second copy while the service is running.
 
 ```bash
 sudo systemctl status obdwhiz --no-pager
@@ -221,7 +221,7 @@ node --check web/app.js
 
 On Windows, use `.\.venv\Scripts\python.exe -m unittest discover -s tests -v`.
 
-All **47 automated tests passed** on the Windows development host. These cover the application, Bluetooth setup checks, service generation and private-data exclusion from the archive. Both Pi shell scripts pass Bash syntax checks, and the browser JavaScript passes `node --check`. Prior physical adapter verification was performed on Windows; Pi OS installation, systemd execution and Pi-to-Carista communication still require validation on the actual Pi.
+The automated suite covers the application, Bluetooth setup checks, service generation and private-data exclusion from the archive. Linux CI also validates a generated unit with systemd's actual parser and verifies that it rejects the earlier quoted `WorkingDirectory` defect. This parser check is skipped on Windows. Both Pi shell scripts are checked with Bash, and the browser JavaScript is checked with `node --check`. Prior physical adapter verification was performed on Windows; Pi OS installation, systemd service execution and Pi-to-Carista communication still require validation on the actual Pi.
 
 Tests also cover multi-ECU CAN frames, CAN DTC counts, ISO-TP VIN assembly, incomplete-frame rejection, 29-bit headers, legacy headers, signed readings, bitmap discovery, storage/schema validation, definition applicability, API isolation, read-only command boundaries, mocked AI source/citation handling, scan/poll lifecycles, vehicle sorting, VIN validation/grouping, mismatched VIN rejection and evidence-preserving context corrections. Earlier browser checks covered demo review, tire calculation, adapter discovery/connection, vehicle/session selection and responsive layout.
 

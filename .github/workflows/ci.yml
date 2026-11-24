@@ -25,6 +25,7 @@ jobs:
           python -c 'import bleak, serial; import bleak.backends.bluezdbus.client'
       - name: Check launchers and browser script
         run: |
+          systemd-analyze --version
           bash -n install-pi.sh
           bash -n Start-OBDWhiz.sh
           bash install-pi.sh --help

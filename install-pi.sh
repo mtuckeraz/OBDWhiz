@@ -52,9 +52,12 @@ python3 -m venv .venv
 chmod +x Start-OBDWhiz.sh install-pi.sh
 
 if "$service"; then
-  unit_file="$(mktemp)"
-  trap 'rm -f -- "$unit_file"' EXIT
+  unit_dir="$(mktemp -d)"
+  unit_file="$unit_dir/obdwhiz.service"
+  trap 'rm -f -- "$unit_file"; rmdir -- "$unit_dir"' EXIT
   .venv/bin/python tools/render_service.py "$project_dir" "$(id -un)" "$(id -gn)" > "$unit_file"
+  # Verify the actual generated unit before replacing an existing service.
+  sudo systemd-analyze verify "$unit_file"
   sudo install -m 0644 "$unit_file" /etc/systemd/system/obdwhiz.service
   sudo systemctl daemon-reload
   sudo systemctl enable obdwhiz.service
