@@ -173,6 +173,54 @@ class FleetEngineTests(unittest.IsolatedAsyncioTestCase):
                 callback(device, SimpleNamespace())
             self.assertEqual(reader['address'] in self.fleet.pending_seen, radio == RADIO)
 
+    async def test_scanner_lifecycle_uses_real_callback_validation_and_updates_presence(self):
+        from bleak.backends.scanner import BaseBleakScanner
+        reader = self.fleet.data.register(spec())
+        manager = self.bluetooth
+        manager.objects = {RADIO: {'org.bluez.Adapter1': {'Address': '00:11:22:33:44:55', 'Powered': True}}}
+        manager.refresh = AsyncMock()
+        manager.set_property = AsyncMock()
+        scanners = []
+
+        class Scanner:
+            def __init__(scanner, detection_callback, **kwargs):
+                scanner._ad_callbacks = {}
+                scanner.options = kwargs
+                scanner.stopped = False
+                BaseBleakScanner.register_detection_callback(scanner, detection_callback)
+                scanners.append(scanner)
+
+            async def start(scanner):
+                for callback in scanner._ad_callbacks.values():
+                    callback(SimpleNamespace(address=reader['address']), SimpleNamespace())
+
+            async def stop(scanner):
+                scanner.stopped = True
+
+        self.fleet.state['running'] = True
+        with patch('bleak.BleakScanner', Scanner):
+            task = asyncio.create_task(self.fleet.watch())
+            try:
+                async def wait_for_presence():
+                    while self.fleet.data.reader(reader['address'])['presence'] != 'present':
+                        await asyncio.sleep(0.01)
+                await asyncio.wait_for(wait_for_presence(), timeout=2)
+                self.assertTrue(scanners[0].options['bluez']['filters']['DuplicateData'])
+            finally:
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+        self.assertTrue(scanners[0].stopped)
+
+    async def test_a_live_scan_connection_keeps_presence_when_reader_stops_advertising(self):
+        reader = self.enroll()
+        self.fleet.seen[reader['address']] = time.monotonic() - 91
+        self.manual.state['connected'] = True
+        self.manual.connection_address = reader['address']
+        self.fleet.presence_tick()
+        self.assertEqual(self.fleet.data.reader(reader['address'])['presence'], 'present')
+        self.manual.state['connected'] = False
+
     async def test_ten_readers_take_turns_without_overlapping_connections(self):
         readers = [self.enroll(n) for n in range(10)]
         await asyncio.gather(*(self.fleet.scan_one(reader, 'continuous') for reader in readers))

@@ -150,6 +150,8 @@ class Fleet:
                                 await asyncio.wait_for(scanner.stop(), timeout=5)
                         self.state['radioErrors'][controller] = str(exc)
                         self.scanner_retry[controller] = time.monotonic() + 30
+                if settings['enabled']:
+                    self.presence_tick()
                 await asyncio.sleep(2)
         finally:
             for scanner in list(self.scanners.values()):
