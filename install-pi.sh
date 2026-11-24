@@ -42,7 +42,7 @@ sudo systemctl enable --now bluetooth.service
 sudo systemctl enable --now avahi-daemon.service
 sudo rfkill unblock bluetooth
 if ! bluetoothctl power on; then
-  printf 'Warning: Bluetooth could not be powered on. Check the controller after logging in again.\n' >&2
+  printf 'Bluetooth is not on yet. Use the web interface to turn it on after the service starts.\n' >&2
 fi
 
 # A venv avoids changing Raspberry Pi OS's managed Python environment.
@@ -70,10 +70,11 @@ fi
 if ! .venv/bin/python tools/check_bluetooth.py; then
   printf '\nInstallation finished, but Bluetooth needs attention; see the check above.\n' >&2
 fi
-printf '\nOBDWhiz installed. Log out and back in to apply Bluetooth/serial group membership.\n'
+printf '\nOBDWhiz installed.\n'
 if "$service"; then
   printf 'The boot service is running with the new groups. Open http://%s.local:8787 from your phone or laptop.\n' "$(hostname -s)"
 else
+  printf 'Log out/in before using the manual launcher so device groups take effect.\n'
   printf 'Then run: bash Start-OBDWhiz.sh --lan\n'
 fi
 printf '\nBrowser access key (share only with your users):\n'

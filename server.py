@@ -103,7 +103,8 @@ def create_app(data_path=None, *, lan=False, access_key=None):
         def allowed(self, write=False):
             expected = {f'localhost:{self.server.server_port}', f'127.0.0.1:{self.server.server_port}'}
             if lan:
-                names = {hostname, hostname if hostname.endswith('.local') else hostname + '.local', self.connection.getsockname()[0]}
+                short = hostname.split('.')[0]
+                names = {hostname, short, short + '.local', hostname if hostname.endswith('.local') else hostname + '.local', self.connection.getsockname()[0]}
                 expected.update(f'{name}:{self.server.server_port}' for name in names)
             if self.headers.get('Host', '').lower() not in expected:
                 self.json({'error': 'Use this Pi hostname or IP address to open OBDWhiz.'}, 403)

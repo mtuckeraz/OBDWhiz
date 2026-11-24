@@ -26,6 +26,12 @@ cd "$HOME/OBDWhiz" && sudo systemctl stop obdwhiz && git pull --ff-only && bash 
 
 If Git reports local source changes, resolve them before updating; the command does not overwrite them.
 
+If an older installation failed with **bad unit file setting**, update and regenerate the unit directly:
+
+```bash
+cd "$HOME/OBDWhiz" && git pull --ff-only && bash install-pi.sh --service
+```
+
 ### Install from an archive
 
 Copy `obdwhiz-pi-0.3.0.tar.gz` and its `.sha256` file from this project's `output` directory to your Pi. In a Pi terminal, as your normal user:
