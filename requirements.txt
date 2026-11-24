@@ -1,0 +1,5 @@
+# Raspberry Pi OS system dependencies are installed by install-pi.sh:
+# bluez, bluetooth, dbus, rfkill, python3-venv, python3-pip, ca-certificates.
+# Bleak installs its Linux D-Bus Python backend transitively.
+bleak==3.0.2
+pyserial==3.5

@@ -1,0 +1,38 @@
+name: Pi software checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.11', '3.13']
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install and verify Linux Bluetooth Python dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip check
+          python -c 'import bleak, serial; import bleak.backends.bluezdbus.client'
+      - name: Check launchers and browser script
+        run: |
+          bash -n install-pi.sh
+          bash -n Start-OBDWhiz.sh
+          bash install-pi.sh --help
+          node --check web/app.js
+      - name: Test diagnostics, storage, Bluetooth setup and packaging
+        run: python -m unittest discover -s tests -v
+      - name: Build the clean Pi release
+        run: |
+          python tools/build_release.py
+          cd output
+          sha256sum -c *.sha256
