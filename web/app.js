@@ -1,30 +1,76 @@
 'use strict';
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
-const state = { status: null, bluetooth: null, fleet: null, fleetEvents: [], fleetCursor: null, scans: [], vehicles: [], selected: null, devices: [], definitions: [], busy: false, lastScanSignature: '', view: 'workspace', authenticated: false };
+const state = { status: null, bluetooth: null, fleet: null, fleetEvents: [], fleetCursor: null, scans: [], vehicles: [], selected: null, devices: [], busy: false, lastScanSignature: '', view: 'workspace', authenticated: false };
 const escapeHTML = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const E = escapeHTML;
 const date = (v) => v ? new Date(v).toLocaleString(undefined, {dateStyle:'medium', timeStyle:'short'}) : '';
 const fleetDate = (v) => v ? new Date(v).toLocaleString(undefined, {year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',timeZoneName:'short'}) : '';
 const safeURL = (v) => {try {const u = new URL(v); return ['http:','https:'].includes(u.protocol) ? u.href : '#';} catch {return '#';}};
-let toastTimer, fileMode, refreshRunning = false;
+let toastTimer, refreshRunning = false;
 
 function toast(message, error=false) { const el = $('#toast'); el.textContent = message; el.classList.toggle('error', error); el.hidden=false; clearTimeout(toastTimer); toastTimer=setTimeout(()=>el.hidden=true, error ? 12000 : 5000); }
-async function api(path, body) {
-  const response = await fetch('/api' + path, body === undefined ? {} : {method:'POST', headers:{'Content-Type':'application/json','X-Apex-Client':'1'}, body:JSON.stringify(body)});
+async function api(path, body, fileType) {
+  const response = await fetch('/api' + path, body === undefined ? {} : {method:'POST', headers:{'Content-Type':fileType || 'application/json','X-Apex-Client':'1'}, body:fileType ? body : JSON.stringify(body)});
   const data = await response.json();
   if(response.status===401 && path!=='/login')showLogin();
   if (!response.ok) throw new Error(data.error || 'Request failed');
   return data;
 }
-function showLogin() {state.authenticated=false;document.body.classList.add('signed-out');$('#login-screen').hidden=false;$('#sign-out').hidden=true;}
-function signedIn(required) {state.authenticated=true;document.body.classList.remove('signed-out');$('#login-screen').hidden=true;$('#sign-out').hidden=!required;}
-$('#login-form').addEventListener('submit',async e=>{
-  e.preventDefault();const b=$('#login-form button');b.disabled=true;
-  try {await api('/login',{key:$('#access-key').value});$('#access-key').value='';$('#login-error').textContent='';signedIn(true);await refresh();await loadDefinitions();}
-  catch(error){$('#login-error').textContent=error.message;}finally{b.disabled=false;}
-});
-$('#sign-out').addEventListener('click',async()=>{await api('/logout',{});localStorage.removeItem('apex-vehicle');location.reload();});
+function showLogin(changePassword = false, username = '') {
+  state.authenticated = false;
+  document.body.classList.add('signed-out');
+  $('#login-screen').hidden = false;
+  $('#login-loading').hidden = true;
+  $('#login-form').hidden = changePassword;
+  $('#initial-password-form').hidden = !changePassword;
+  $('#password-username').value = username;
+  $('#sign-out').hidden = true;
+  (changePassword ? $('#initial-password-form').elements.password : $('#staff-login')).focus();
+}
+
+function signedIn(session) {
+  state.authenticated = true;
+  state.user = session.user;
+  document.body.classList.remove('signed-out');
+  document.body.classList.toggle('regular-user', session.user?.role === 'user');
+  $('#login-screen').hidden = true;
+  $('#sign-out').hidden = !session.required;
+  if(location.hash==='#setup/fleet')$('#fleet').scrollIntoView({block:'start'});
+  if(session.user?.role==='user' && state.view==='notifications')view('workspace');
+}
+
+async function submitAccountForm(event, route, errorId) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector('button');
+  const error = $(errorId);
+  error.textContent = '';
+  button.disabled = true;
+  try {
+    await api(route, Object.fromEntries(new FormData(form)));
+    form.reset();
+    location.reload();
+  } catch (failure) {
+    error.textContent = failure.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+$('#login-form').onsubmit = event => submitAccountForm(event, '/login', '#login-error');
+$('#initial-password-form').onsubmit = event => submitAccountForm(event, '/password', '#password-error');
+
+async function signOut() {
+  try {
+    await api('/logout', {});
+    localStorage.removeItem('apex-vehicle');
+    location.reload();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+$('#sign-out').onclick = signOut;
+$('#password-back').onclick = signOut;
 async function action(button, task) {
   if (state.busy) return;
   state.busy = true;
@@ -33,11 +79,20 @@ async function action(button, task) {
   finally {state.busy=false; button.textContent=old; button.disabled=false; await refresh();}
 }
 function view(name) {
-  if (!document.getElementById(name)?.classList.contains('view')) name='workspace';
+  const [page, target] = name.split('/');
+  const fleetSetup = page === 'fleet' || (page === 'setup' && target === 'fleet');
+  const returnToSetup = !fleetSetup && page === 'setup' && location.hash === '#setup/fleet';
+  name = fleetSetup ? 'setup' : document.getElementById(page)?.classList.contains('view') ? page : 'workspace';
+  if(name==='notifications' && state.user?.role==='user')name='workspace';
+  state.viewTarget = ['scanners', 'dossiers'].includes(name) && /^[0-9a-f-]{36}$/.test(target || '') ? target : null;
   state.view=name; $$('.view').forEach(el=>el.classList.toggle('active',el.id===name));
   $$('.nav').forEach(el=>el.classList.toggle('active',el.dataset.view===name));
-  $('#view-name').textContent = ({workspace:'Overview',connection:'Adapter & vehicle',fleet:'Fleet scans',library:'OEM reference library',adaptations:'Adaptation planner',setup:'Setup'})[name];
-  history.replaceState(null,'','#'+name);
+  $('#view-name').textContent = ({workspace:'Overview',connection:'Adapter & vehicle',dossiers:'Vehicle Scans',scanners:'Scanner Inventory',library:'DTC reference library',notifications:'Notifications',setup:'Setup'})[name];
+  const hash = fleetSetup ? '#setup/fleet' : '#'+name+(state.viewTarget ? '/'+state.viewTarget : '');
+  if(location.hash!==hash)history.replaceState(null,'',hash);
+  document.dispatchEvent(new CustomEvent('obd-view',{detail:name}));
+  if(fleetSetup && state.authenticated)$('#fleet').scrollIntoView({block:'start'});
+  if(returnToSetup)$('#setup').scrollIntoView({block:'start'});
 }
 document.addEventListener('click',e=>{const target=e.target.closest('[data-view]');if(target)view(target.dataset.view);});
 window.addEventListener('hashchange',()=>view(location.hash.slice(1)));
@@ -98,14 +153,17 @@ function renderStatus() {
   $('#bridge-values').innerHTML=readingsHTML(a.latest);
   $('#poll-stamp').textContent=a.lastSampleAt?`Last cycle: ${date(a.lastSampleAt)} · ${a.polling?'polling':'stopped'}`:'';
   $('#dependency-status').textContent=Object.values(dependencies).every(Boolean)?'Python Bluetooth LE and serial libraries are installed.':'Bluetooth libraries are missing. '+state.status.installHint;
-  if(document.activeElement!==$('#ai-model') && !$('#ai-form').dataset.dirty) {$('#ai-model').value=ai.model;$('#auto-research').checked=ai.autoResearch;}
+  if(!$('#ai-form').dataset.dirty) {
+    renderAIModel(ai.model);
+    $('#auto-research').checked=ai.autoResearch;
+  }
 }
 function renderDevices() {
   const signature=JSON.stringify([state.devices,state.status?.adapter.connected,state.bluetooth?.pairing.status,state.busy]);
   if($('#device-list').dataset.signature===signature)return;
   $('#device-list').dataset.signature=signature;
   const disabled=state.busy || state.status?.adapter.connected || state.bluetooth?.pairing.status==='pairing';
-  $('#device-list').innerHTML=state.devices.map((d,i)=>`<div class="device"><div><strong>${E(d.name)}${d.saved?' · Saved receiver':''}</strong><p>${E(d.transport==='ble'?'Bluetooth LE':'Serial')} · ${E(d.id)}${d.rssi!=null?' · '+E(d.rssi)+' dBm':''}</p><p>${E(d.hint||'')}${d.paired?' · Paired':''}${d.trusted?' · Remembered by Pi':''}</p>${d.uuids?.length?`<details><summary>Advertised services</summary><p>${d.uuids.map(E).join('<br>')}</p></details>`:''}</div><div class="receiver-actions">${state.bluetooth?.available&&d.transport==='ble'?`<button class="button secondary" data-fleet="${i}" ${disabled?'disabled':''}>Add to fleet</button><button class="button secondary" data-pair="${i}" ${disabled?'disabled':''}>Pair (optional)</button>`:''}<button class="button secondary" data-device="${i}" ${disabled?'disabled':''}>Connect & scan</button></div></div>`).join('')||'<p class="muted">Discover nearby receivers, then choose your own OBD adapter.</p>';
+  $('#device-list').innerHTML=state.devices.map((d,i)=>`<div class="device"><div><strong>${E(d.name)}${d.saved?' · Saved receiver':''}</strong><p>${E(d.transport==='ble'?'Bluetooth LE':'Serial')} · ${E(d.id)}${d.rssi!=null?' · '+E(d.rssi)+' dBm':''}</p><p>${E(d.hint||'')}${d.paired?' · Paired':''}${d.trusted?' · Remembered by Pi':''}</p>${d.uuids?.length?`<details><summary>Advertised services</summary><p>${d.uuids.map(E).join('<br>')}</p></details>`:''}</div><div class="receiver-actions">${state.bluetooth?.available&&d.transport==='ble'?`<button class="button secondary" data-admin-only data-fleet="${i}" ${disabled?'disabled':''}>Add to fleet</button><button class="button secondary" data-pair="${i}" ${disabled?'disabled':''}>Pair (optional)</button>`:''}<button class="button secondary" data-device="${i}" ${disabled?'disabled':''}>Connect & scan</button></div></div>`).join('')||'<p class="muted">Discover nearby receivers, then choose your own OBD adapter.</p>';
 }
 function renderFleet() {
   const f=state.fleet;if(!f)return;
@@ -113,14 +171,29 @@ function renderFleet() {
   $('#fleet-toggle').textContent=f.settings.enabled?'Pause automatic scans':'Resume automatic scans';
   $('#fleet-worker').textContent=!f.settings.enabled?'Paused':f.busyReader?'Scanning '+f.busyReader:f.running?'Monitoring':'Waiting for service';
   $('#fleet-error').textContent=[f.lastError,...Object.values(f.radioErrors||{})].filter(Boolean).join(' · ');
-  if(document.activeElement!==$('#fleet-interval'))$('#fleet-interval').value=f.settings.scanIntervalSeconds;
+  if(!$('#fleet-schedule').dataset.dirty) {
+    $('#fleet-interval').value=f.settings.scanIntervalSeconds/60;
+    $('#fleet-return-after').value=f.settings.returnAfterSeconds/60;
+  }
   const signature=JSON.stringify(f.readers);
-  if($('#fleet-readers').dataset.signature!==signature){$('#fleet-readers').dataset.signature=signature;$('#fleet-readers').innerHTML=f.readers.map(r=>`<article class="fleet-reader"><div class="panel-heading"><strong>${E(r.label)}</strong><span class="badge ${r.lastError?'amber':r.scanFresh?'':'neutral'}">${r.scanFresh?'Fresh scan':E(r.lastScanStatus)}${r.lastCodeCount!=null?' · '+r.lastCodeCount+' code(s)':''}</span></div><p class="muted small">${E(r.address)} · ${E(r.presence)}${r.vin?' · VIN '+E(r.vin):' · VIN awaiting vehicle response'}</p><p class="muted small">Last scan: ${r.lastScanAt?E(fleetDate(r.lastScanAt)):'Not yet captured'}${r.lastScanAgeSeconds!=null?' · '+Math.round(r.lastScanAgeSeconds)+' seconds ago':''}</p>${r.lastError?`<p class="error-text">${E(r.lastError)}</p>`:''}<div class="actions">${r.lastScanId?`<a class="button secondary" href="/api/scans/${E(r.lastScanId)}/diagnostic">Diagnostic file</a>`:''}<button class="text-button" data-remove-reader="${E(r.address)}">Remove reader</button></div></article>`).join('')||'<p class="muted">Discover receivers in Adapter & vehicle, then Add to fleet. A manual connection also registers a Carista and starts its first scan automatically.</p>';}
+  if($('#fleet-readers').dataset.signature!==signature){$('#fleet-readers').dataset.signature=signature;$('#fleet-readers').innerHTML=f.readers.map(r=>`<article class="fleet-reader"><div class="panel-heading"><strong>${E(r.label)}</strong><span class="badge ${r.lastError?'amber':r.scanFresh?'':'neutral'}">${r.scanFresh?'Fresh scan':E(r.lastScanStatus)}${r.lastCodeCount!=null?' · '+r.lastCodeCount+' code(s)':''}</span></div><p class="muted small">${E(r.address)} · ${E(r.presence)}${r.vin?' · VIN '+E(r.vin):' · VIN awaiting vehicle response'}</p><p class="muted small">Last scan: ${r.lastScanAt?E(fleetDate(r.lastScanAt)):'Not yet captured'}${r.lastScanAgeSeconds!=null?' · '+Math.round(r.lastScanAgeSeconds)+' seconds ago':''}</p>${r.lastError?`<p class="error-text">${E(r.lastError)}</p>`:''}<div class="actions">${r.lastScanId?`<a class="button secondary" href="/api/scans/${E(r.lastScanId)}/diagnostic">Diagnostic file</a>`:''}<button class="text-button" data-admin-only data-remove-reader="${E(r.address)}">Remove reader</button></div></article>`).join('')||'<p class="muted">Discover receivers in Adapter & vehicle, then Add to fleet. A manual connection also registers a Carista and starts its first scan automatically.</p>';}
   const events=state.fleetEvents.slice(-40).reverse();
   $('#fleet-events').innerHTML=events.map(e=>`<div class="fleet-event"><strong>${E(e.type.replaceAll('_',' '))}${e.code?' · '+E(e.code):''}</strong><span class="muted small">${E(fleetDate(e.createdAt))} · ${E(e.address||'Fleet monitor')}${e.ecu?' · ECU '+E(e.ecu):''}${e.status?' · '+E(e.status):''}</span>${e.error?`<p class="error-text">${E(e.error)}</p>`:''}${e.scanId?`<a href="/api/scans/${E(e.scanId)}/diagnostic">Download dated diagnostic file</a>`:''}</div>`).join('')||'<p class="muted">Fleet events appear here as readers are detected and scanned.</p>';
 }
 $('#fleet-toggle').addEventListener('click',e=>action(e.target,async()=>{await api('/fleet/settings',{enabled:!state.fleet.settings.enabled});}));
-$('#fleet-interval').addEventListener('change',async e=>{try{await api('/fleet/settings',{scanIntervalSeconds:Number(e.target.value)});await refresh();}catch(error){toast(error.message,true);}});
+$('#fleet-schedule').addEventListener('input',e=>{e.currentTarget.dataset.dirty='true';});
+$('#fleet-schedule').addEventListener('submit',e=>{
+  e.preventDefault();
+  const form=e.currentTarget;
+  const scanIntervalSeconds=Math.round(Number($('#fleet-interval').value)*60);
+  const returnAfterSeconds=Math.round(Number($('#fleet-return-after').value)*60);
+  action(form.querySelector('button'),async()=>{
+    const settings=await api('/fleet/settings',{scanIntervalSeconds,returnAfterSeconds});
+    delete form.dataset.dirty;
+    if(state.fleet){state.fleet.settings=settings;renderFleet();}
+    toast('Fleet scan schedule saved.');
+  });
+});
 $('#fleet-readers').addEventListener('click',e=>{const b=e.target.closest('[data-remove-reader]');if(b)action(b,async()=>{await api('/fleet/remove',{address:b.dataset.removeReader});toast('Reader removed from automatic scans. Diagnostic history was retained.');});});
 function renderBluetooth() {
   const b=state.bluetooth;if(!b)return;
@@ -180,8 +253,8 @@ function renderScan() {
   $('#scan-detail').dataset.sessions=sessionsForScan(s.id);
   const matched=s.definitionMatches||[];
   const codes=s.codes.map(c=>{
-    const refs=matched.filter(d=>d.code===c.code && d.ecu===c.ecu);
-    return `<article class="code"><div class="code-head"><strong>${E(c.code)}</strong><span class="badge ${c.status==='pending'?'neutral':'amber'}">${E(c.status||'status unknown')}</span><span class="muted small">${E(c.ecu||'ECU not supplied')}</span></div><p>${E(c.definition || 'Definition not established for this vehicle. Research or an exact OEM reference is needed.')}</p>${c.definition?'<p class="small">Description supplied by scan source; verify against OEM documentation.</p>':''}${refs.map(d=>`<p class="reference">Library: ${E(d.description)} · <a href="${E(safeURL(d.sourceUrl))}" target="_blank" rel="noopener noreferrer">${E(d.reference)}</a> (user-supplied)</p>`).join('')}</article>`;
+    const refs=matched.filter(d=>d.code===c.code && (!d.ecu || d.ecu.toLowerCase()===(c.ecu || '').toLowerCase()));
+    return `<article class="code"><div class="code-head"><strong>${E(c.code)}</strong><span class="badge ${c.status==='pending'?'neutral':'amber'}">${E(c.status||'status unknown')}</span><span class="muted small">${E(c.ecu||'ECU not supplied')}</span></div>${c.definition?`<p>${E(c.definition)}</p><p class="small">Description supplied by scan source; verify against OEM documentation.</p>`:refs.length?'':'<p>Definition not established for this vehicle. Research or an exact OEM reference is needed.</p>'}${refs.map(d=>`<p class="reference">${E(d.origin)} · ${E(d.description)} · ${definitionSource(d)}</p>`).join('')}</article>`;
   }).join('');
   const reportStatus=({idle:'No research run yet.',running:'Searching sources and comparing possible causes…',error:r.error,demo:'Demonstration · no AI request sent'})[r.status] || (r.searched?'Internet sources consulted.':'No web search recorded; verify report sources.');
   const citations=[...new Map((r.citations||[]).filter(c=>safeURL(c.url)!=='#').map(c=>[c.url,c])).values()];
@@ -191,6 +264,9 @@ function renderScan() {
     </div><div class="actions">${!s.demo?'<button class="button secondary" id="edit-vehicle">Edit vehicle</button>':''}<button class="button secondary" id="export">Export JSON</button></div></div>
     <p class="muted small">${E(s.scope||'Coverage not supplied by source.')}</p>
     <p class="vehicle-vin">${s.vin?'VIN · '+E(s.vin)+(s.vinSource==='manual'?' · manually entered':''):'VIN not captured'}</p>
+    ${s.scannerId?`<p class="muted small"><a href="#scanners/${E(s.scannerId)}">${E(s.scannerIdentifier || 'Scanner profile')}</a>
+      ${s.vehicleId?` · <a href="#dossiers/${E(s.vehicleId)}">Vehicle dossier</a>`:''}${s.scanStatus?' · '+E(s.scanStatus):''}</p>`:''}
+    ${s.diagnosticFile && !s.diagnosticFileError?`<p><a href="/api/scans/${E(s.id)}/diagnostic">Download dated diagnostic file</a></p>`:''}
     ${sessions.length>1?`<label class="session-picker">Scan session<select id="scan-session">${sessions.map(scan=>`<option value="${E(scan.id)}" ${scan.id===s.id?'selected':''}>${E(date(scan.createdAt))} · ${scan.codes.length} code${scan.codes.length===1?'':'s'} · ${E(scan.id.slice(0,8))}</option>`).join('')}</select></label>`:''}
     ${(s.warnings||[]).map(w=>`<p class="warning">${E(w)}</p>`).join('')}
     ${(s.monitors||[]).map(m=>`<p class="muted small">ECU ${E(m.ecu)} · MIL ${m.mil?'on':'off'} · Reported DTC count ${E(m.dtcCount)} · Readiness bytes ${E(m.readinessBytes)}</p>`).join('')}
@@ -262,34 +338,310 @@ $('#start-poll').addEventListener('click',e=>action(e.target,async()=>{await api
 $('#stop-poll').addEventListener('click',e=>action(e.target,async()=>{await api('/poll',{enabled:false});toast('Live polling stopped.');}));
 $('#demo').addEventListener('click',e=>action(e.target,async()=>{state.selected=await api('/demo',{});renderScan();toast('Demonstration loaded. No vehicle or AI connection used.');}));
 
-function pickFile(mode){fileMode=mode;$('#file-input').value='';$('#file-input').click();}
-$('#import-scan').addEventListener('click',()=>pickFile('scan'));
-$('#import-definitions').addEventListener('click',()=>pickFile('definitions'));
+function pickFile(selector){const input=$(selector);input.value='';input.click();}
+$('#import-scan').addEventListener('click',()=>pickFile('#file-input'));
+$('#import-definitions').addEventListener('click',()=>pickFile('#definition-file'));
 $('#file-input').addEventListener('change',async e=>{
   const file=e.target.files[0];if(!file)return;
   try{
     if(file.size>5_000_000)throw new Error('Upload limit is 5 MB.');
     const data=JSON.parse(await file.text());
-    if(fileMode==='scan'){state.selected=await api('/import',data);renderScan();view('workspace');toast('Scan imported.');}
-    else{const result=await api('/definitions',data);await loadDefinitions();toast(`${result.count} reference definitions imported.`);}
+    state.selected=await api('/import',data);renderScan();view('workspace');toast('Scan imported.');
     await refresh();
   }catch(e){toast(e.message,true);}
 });
-async function loadDefinitions(){
-  state.definitions=await api('/definitions');$('#definition-count').textContent=state.definitions.length+' REFERENCES';
-  $('#definition-list').innerHTML=state.definitions.length?state.definitions.map(d=>`<div class="reference-row"><strong>${E(d.make)} ${E(d.model)} · ${E(d.yearFrom)}–${E(d.yearTo)} · ${E(d.ecu)} · ${E(d.code)}</strong><p>${E(d.description)}</p><a href="${E(safeURL(d.sourceUrl))}" target="_blank" rel="noopener noreferrer">${E(d.reference)}</a><p class="small">User-supplied · not independently verified</p></div>`).join(''):'<div class="empty"><p>No manufacturer definitions imported yet.</p></div>';
+$('#definition-file').addEventListener('change',async e=>{
+  const file=e.target.files[0];
+  if(!file)return;
+  const extension=file.name.split('.').pop().toLowerCase();
+  const button=$('#import-definitions');
+  button.disabled=true;
+  try{
+    if(extension!=='json' && extension!=='csv')throw new Error('Choose a .json or .csv file.');
+    if(file.size>5_000_000)throw new Error('Upload limit is 5 MB.');
+    if(!file.size)throw new Error('The definitions file is empty.');
+    const result=await api('/definitions',file,extension==='csv'?'text/csv':'application/json');
+    await loadDefinitions();
+    toast(`${result.count} reference ${result.count===1?'definition':'definitions'} imported.`);
+  }catch(error){toast(error.message,true);}
+  finally{button.disabled=false;}
+});
+const definitionSearch = $('#definition-search');
+const definitionForm = $('#definition-source-form');
+const definitionStatus = $('#definition-extraction-status');
+let definitionPage = 0;
+let definitionQuery = '';
+let definitionRequest = 0;
+let reviewPage = 0;
+let extracted = [];
+let extractionRunning = false;
+let stopExtraction = false;
+let approvingDefinitions = false;
+
+function definitionSource(record) {
+  const label=E(record.reference || 'Source');
+  return record.sourceUrl?`<a href="${E(safeURL(record.sourceUrl))}" target="_blank" rel="noopener noreferrer">${label}</a>`:E(record.reference || '');
 }
+
+function definitionTitle(record) {
+  const vehicle=record.make?`${record.make} ${record.model} · ${record.yearFrom}–${record.yearTo}`:'Generic OBD-II';
+  return [record.code, vehicle, record.ecu].filter(Boolean).join(' · ');
+}
+
+async function loadDefinitions(page = definitionPage) {
+  const request=++definitionRequest;
+  const result=await api(`/definitions/catalog?q=${encodeURIComponent(definitionQuery)}&page=${page}`);
+  if(request!==definitionRequest)return;
+  definitionPage=page;
+  $('#definition-count').textContent=`${result.total.toLocaleString()} references`;
+  $('#definition-prev').disabled=page===0;
+  $('#definition-next').disabled=(page+1)*result.pageSize>=result.total;
+  $('#definition-list').innerHTML=result.records.map(record=>`<article class="reference-row"><strong>${E(definitionTitle(record))}</strong><p>${E(record.description)}</p><p>${E(record.origin)} · ${definitionSource(record)}</p></article>`).join('') || '<p class="muted">No matching definitions.</p>';
+}
+definitionSearch.addEventListener('submit',event=>{
+  event.preventDefault();
+  definitionQuery=definitionSearch.elements.query.value.trim();
+  loadDefinitions(0).catch(error=>toast(error.message,true));
+});
+$('#definition-prev').addEventListener('click',()=>loadDefinitions(definitionPage-1).catch(error=>toast(error.message,true)));
+$('#definition-next').addEventListener('click',()=>loadDefinitions(definitionPage+1).catch(error=>toast(error.message,true)));
+document.addEventListener('obd-view',event=>{
+  if(event.detail==='library' && state.authenticated)loadDefinitions().catch(error=>toast(error.message,true));
+});
+
+function renderDefinitionReview() {
+  const pageSize=25;
+  const pages=Math.max(1,Math.ceil(extracted.length/pageSize));
+  reviewPage=Math.min(reviewPage,pages-1);
+  $('#definition-review').hidden=!extracted.length;
+  $('#definition-review-prev').disabled=reviewPage===0 || approvingDefinitions;
+  $('#definition-review-next').disabled=reviewPage===pages-1 || approvingDefinitions;
+  $('#definition-approve').disabled=approvingDefinitions || !extracted.some(record=>record.selected);
+  $('#definition-review-list').innerHTML=extracted.slice(reviewPage*pageSize,(reviewPage+1)*pageSize)
+    .map((record,index)=>`<div class="reference-row"><label class="check"><input type="checkbox" data-definition-index="${reviewPage*pageSize+index}" ${record.selected?'checked':''} ${approvingDefinitions?'disabled':''}><span><strong>${E(definitionTitle(record))}</strong><br>${E(record.description)}</span></label></div>`).join('');
+}
+
+definitionForm.addEventListener('submit',async event=>{
+  event.preventDefault();
+  if(extractionRunning || approvingDefinitions)return;
+  if(extracted.length && !window.confirm('Replace the definitions currently awaiting review?'))return;
+  const fields=definitionForm.elements;
+  const file=fields.file.files[0];
+  const button=definitionForm.querySelector('button[type="submit"], button:not([type])');
+  const stop=$('#definition-stop');
+  extractionRunning=true;
+  button.disabled=true;
+  stopExtraction=false;
+  try{
+    if(file?.size>1_000_000)throw new Error('Source files can be up to 1 MB.');
+    if(file && fields.source.value.trim())throw new Error('Choose either a source file or pasted text.');
+    definitionStatus.textContent='Preparing source…';
+    const source=file?await file.text():fields.source.value;
+    const suffix=file?.name.split('.').pop().toLowerCase();
+    const format=({tsv:'csv',csv:'csv',json:'json'})[suffix] || 'text';
+    const {batches}=await api('/definitions/prepare',{source,format});
+    const defaults=Object.fromEntries(['make','model','yearFrom','yearTo'].filter(key=>fields[key].value.trim()).map(key=>[key,fields[key].value.trim()]));
+    const sourceUrl=fields.sourceUrl.value.trim();
+    if(sourceUrl && safeURL(sourceUrl)==='#')throw new Error('Use an HTTP or HTTPS source URL.');
+    const reference=file?.name || 'Pasted OEM source';
+    const staged=new Map();
+    let skipped=0;
+    extracted=[];
+    reviewPage=0;
+    renderDefinitionReview();
+    stop.hidden=false;
+    stop.disabled=false;
+    for(let index=0;index<batches.length && !stopExtraction;index++){
+      definitionStatus.textContent=`Extracting batch ${index+1} of ${batches.length}…`;
+      const result=await api('/definitions/extract',{source:batches[index],defaults});
+      skipped+=result.skipped;
+      for(const record of result.definitions){
+        const key=JSON.stringify([record.make,record.model,record.yearFrom,record.yearTo,record.code,record.ecu,record.description]);
+        staged.set(key,{...record,sourceUrl,reference,selected:true});
+      }
+      extracted=[...staged.values()];
+    }
+    definitionStatus.textContent=`${extracted.length.toLocaleString()} definitions ready to review.${skipped?` ${skipped} incomplete entries skipped.`:''}${stopExtraction?' Extraction stopped.':''}`;
+  }catch(error){definitionStatus.textContent=error.message+(extracted.length?' Completed results are available for review.':'');}
+  finally{
+    extractionRunning=false;
+    button.disabled=false;
+    stop.hidden=true;
+    renderDefinitionReview();
+  }
+});
+$('#definition-stop').addEventListener('click',event=>{stopExtraction=true;event.currentTarget.disabled=true;});
+$('#definition-review-prev').addEventListener('click',()=>{reviewPage--;renderDefinitionReview();});
+$('#definition-review-next').addEventListener('click',()=>{reviewPage++;renderDefinitionReview();});
+$('#definition-review-list').addEventListener('change',event=>{
+  const index=event.target.dataset.definitionIndex;
+  if(index===undefined)return;
+  extracted[index].selected=event.target.checked;
+  $('#definition-approve').disabled=!extracted.some(record=>record.selected);
+});
+$('#definition-approve').addEventListener('click',async()=>{
+  if(extractionRunning || approvingDefinitions)return;
+  approvingDefinitions=true;
+  renderDefinitionReview();
+  let saved=0;
+  try{
+    const selected=extracted.filter(record=>record.selected);
+    for(let index=0;index<selected.length;index+=50){
+      const batch=selected.slice(index,index+50);
+      await api('/definitions/approve',{definitions:batch});
+      const completed=new Set(batch);
+      extracted=extracted.filter(record=>!completed.has(record));
+      saved+=batch.length;
+      definitionStatus.textContent=`Added ${saved.toLocaleString()} definitions.`;
+    }
+    extracted=[];
+    await loadDefinitions(0);
+  }catch(error){definitionStatus.textContent=`Added ${saved.toLocaleString()} definitions. ${error.message}`;}
+  finally{approvingDefinitions=false;renderDefinitionReview();}
+});
 $('#definition-format').textContent=JSON.stringify({definitions:[{make:'Exact make',model:'Exact model',yearFrom:2025,yearTo:2026,ecu:'Exact ECU name or response ID',code:'OEM_CODE',description:'Definition from your licensed reference',sourceUrl:'https://manufacturer.example/service-reference',reference:'Document ID, revision and page'}]},null,2);
 $('#scan-format').textContent=JSON.stringify({vehicle:{make:'McLaren',model:'Exact model',year:2026,engine:'Engine / software',symptoms:'Describe symptoms'},codes:[{code:'RAW_OEM_CODE',ecu:'Module name or address',status:'stored',definition:null}],readings:[],trace:[],warnings:['Document source-tool coverage here'],scope:'Modules covered by the source tool'},null,2);
 $('#scan-format-button').addEventListener('click',()=>$('#scan-format').hidden=!$('#scan-format').hidden);
-$('#ai-form').addEventListener('input',()=>$('#ai-form').dataset.dirty='true');
-$('#ai-form').addEventListener('submit',e=>{e.preventDefault();action($('#ai-form button'),async()=>{await api('/settings',{apiKey:$('#api-key').value,model:$('#ai-model').value.trim(),autoResearch:$('#auto-research').checked});$('#api-key').value='';delete $('#ai-form').dataset.dirty;toast('AI settings applied for this server session.');});});
-$('#clear-key').addEventListener('click',e=>action(e.target,async()=>{await api('/settings',{clearKey:true});$('#api-key').value='';toast('AI key cleared from server memory.');}));
+const aiModelSelect = $('#ai-model');
 
-function tireDiameter(value){const m=/^(\d{3})\/(\d{2})R(\d{2})$/i.exec(value.trim());if(!m)throw new Error('Use a tire size such as 275/40R21.');const [w,a,r]=m.slice(1).map(Number);if(w<100||w>500||a<15||a>95||r<10||r>30)throw new Error('Check the tire dimensions.');return w*a/50+r*25.4;}
-$('#tire-form').addEventListener('submit',e=>{e.preventDefault();try{const old=tireDiameter($('#tire-old').value),next=tireDiameter($('#tire-new').value),ratio=next/old,speed=Number($('#tire-speed').value);$('#tire-result').innerHTML=`<div class="tire-metrics"><div class="metric"><span>Current diameter</span><strong>${old.toFixed(1)} mm</strong></div><div class="metric"><span>Proposed diameter</span><strong>${next.toFixed(1)} mm</strong></div><div class="metric"><span>Diameter change</span><strong>${((ratio-1)*100).toFixed(2)}%</strong></div><div class="metric"><span>Estimated actual speed</span><strong>${(speed*ratio).toFixed(1)} km/h</strong></div></div><p class="muted small spaced">Estimate assumes original speed calibration and equal effective rolling diameter. Load, wear and tire construction affect actual results. No coding was sent to the vehicle.</p>`;}catch(e){toast(e.message,true);}});
+function renderAIModel(current) {
+  aiModelSelect.options[0].textContent='Keep current model ('+current+')';
+  aiModelSelect.value=current;
+  if(!aiModelSelect.value)aiModelSelect.value='';
+}
+
+$('#ai-form').addEventListener('input',()=>$('#ai-form').dataset.dirty='true');
+$('#ai-form').addEventListener('submit',e=>{
+  e.preventDefault();
+  action(e.submitter || $('#ai-form button[type="submit"]'),async()=>{
+    const config=await api('/settings',{apiKey:$('#api-key').value,model:aiModelSelect.value || undefined,
+      autoResearch:$('#auto-research').checked});
+    $('#api-key').value='';
+    delete $('#ai-form').dataset.dirty;
+    renderAIModel(config.model);
+    toast('AI settings applied for this server session.');
+  });
+});
+$('#clear-key').addEventListener('click',e=>action(e.target,async()=>{
+  const config=await api('/settings',{clearKey:true});
+  $('#api-key').value='';
+  delete $('#ai-form').dataset.dirty;
+  renderAIModel(config.model);
+  toast('AI key cleared from server memory.');
+}));
+
+const smtpForm = $('#smtp-form');
+const notificationForm = $('#notification-form');
+let notificationRules = [];
+let smtpLoaded = false;
+let notificationsLoading = false;
+
+function renderSMTP(config) {
+  for(const name of ['host','port','security','sender','username'])smtpForm.elements[name].value=config[name];
+  smtpForm.elements.password.value='';
+  $('#smtp-password-status').textContent=config.hasPassword?'Leave the password blank to keep the saved password for this SMTP host and username.':'';
+  smtpLoaded=true;
+}
+
+smtpForm.addEventListener('submit',event=>{
+  event.preventDefault();
+  const config=Object.fromEntries(new FormData(smtpForm));
+  config.port=Number(config.port);
+  action(smtpForm.querySelector('button'),async()=>{
+    renderSMTP(await api('/smtp',config));
+    toast('Outbound email settings saved.');
+  });
+});
+$('#smtp-test-form').addEventListener('submit',event=>{
+  event.preventDefault();
+  const form=event.currentTarget;
+  action(form.querySelector('button'),async()=>{
+    await api('/smtp/test',Object.fromEntries(new FormData(form)));
+    toast('The mail server accepted the test email.');
+  });
+});
+
+function setRuleEditor(rule) {
+  notificationForm.reset();
+  notificationForm.dataset.ruleId=rule?.id || '';
+  $('#notification-form-title').textContent=rule?'Edit alert rule':'New alert rule';
+  $('#notification-cancel').hidden=!rule;
+  if(!rule)return;
+  notificationForm.elements.name.value=rule.name;
+  notificationForm.elements.codes.value=rule.codes.join(', ');
+  notificationForm.elements.recipients.value=rule.recipients.join(', ');
+  notificationForm.elements.enabled.checked=rule.enabled;
+  notificationForm.elements.includeAI.checked=rule.includeAI;
+  notificationForm.elements.name.focus();
+}
+
+async function loadNotifications() {
+  if(notificationsLoading)return;
+  notificationsLoading=true;
+  try{
+    const {rules,deliveries}=await api('/notifications');
+    const ruleList=$('#notification-rules');
+    if(JSON.stringify(rules)!==ruleList.dataset.signature){
+      ruleList.dataset.signature=JSON.stringify(rules);
+      notificationRules=rules;
+      ruleList.innerHTML=rules.map(rule=>`<article class="reference-row">
+        <div class="panel-heading"><strong>${E(rule.name)}</strong><span class="badge neutral">${rule.enabled?'Enabled':'Paused'}</span></div>
+        <p>${rule.codes.map(E).join(' + ')}</p>
+        <p>${rule.recipients.map(E).join(', ')}</p><p>AI suggestions ${rule.includeAI?'on':'off'}</p>
+        <div class="actions"><button class="text-button" data-edit-rule="${E(rule.id)}">Edit</button>
+        <button class="text-button" data-toggle-rule="${E(rule.id)}">${rule.enabled?'Pause':'Enable'}</button>
+        <button class="text-button" data-remove-rule="${E(rule.id)}">Remove</button></div>
+      </article>`).join('') || '<p class="muted">No alert rules yet.</p>';
+    }
+    const activity=$('#notification-deliveries');
+    if(JSON.stringify(deliveries)!==activity.dataset.signature){
+      activity.dataset.signature=JSON.stringify(deliveries);
+      activity.innerHTML=deliveries.map(item=>`<article class="reference-row"><strong>${E(item.name)}</strong>
+        <p>${E(fleetDate(item.createdAt))} · ${({queued:item.attempts?'Retry scheduled':'Queued',sent:'Accepted by mail server',failed:'Delivery failed'})[item.status]}</p>
+        ${item.error?`<p class="error-text">${E(item.error)}</p>`:''}</article>`).join('') || '<p class="muted">No email alerts queued yet.</p>';
+    }
+  }finally{notificationsLoading=false;}
+}
+
+notificationForm.addEventListener('submit',event=>{
+  event.preventDefault();
+  const fields=notificationForm.elements;
+  const splitList=value=>value.split(/[,\n]+/).map(part=>part.trim()).filter(Boolean);
+  const rule={id:notificationForm.dataset.ruleId,name:fields.name.value,codes:splitList(fields.codes.value),
+    recipients:splitList(fields.recipients.value),enabled:fields.enabled.checked,includeAI:fields.includeAI.checked};
+  action(notificationForm.querySelector('button'),async()=>{
+    await api('/notifications',rule);
+    setRuleEditor();
+    await loadNotifications();
+    toast('Notification rule saved.');
+  });
+});
+$('#notification-cancel').addEventListener('click',()=>setRuleEditor());
+$('#notification-rules').addEventListener('click',event=>{
+  const button=event.target.closest('button');
+  if(!button)return;
+  const {editRule,toggleRule,removeRule}=button.dataset;
+  const rule=notificationRules.find(item=>item.id===(editRule||toggleRule||removeRule));
+  if(!rule)return;
+  if(editRule){setRuleEditor(rule);return;}
+  if(removeRule && !window.confirm(`Remove the rule "${rule.name}"?`))return;
+  action(button,async()=>{
+    if(removeRule)await api(`/notifications/${rule.id}/remove`,{});
+    else await api('/notifications',{...rule,enabled:!rule.enabled});
+    if(notificationForm.dataset.ruleId===rule.id)setRuleEditor();
+    await loadNotifications();
+  });
+});
+document.addEventListener('obd-view',event=>{
+  if(!state.authenticated || state.user?.role==='user')return;
+  if(event.detail==='notifications')loadNotifications().catch(error=>toast(error.message,true));
+  if(event.detail==='setup' && !smtpLoaded)api('/smtp').then(renderSMTP).catch(error=>toast(error.message,true));
+});
+setInterval(()=>{
+  if(state.authenticated && state.view==='notifications')loadNotifications().catch(()=>{});
+},10000);
 
 try{const v=JSON.parse(localStorage.getItem('apex-vehicle')||'null');if(v)fillVehicle(v,v.vin);}catch{}
 view(location.hash.slice(1)||'workspace');
-api('/session').then(async session=>{if(!session.authenticated){showLogin();return;}signedIn(session.required);await refresh();await loadDefinitions();const latest=[...state.scans].sort((a,b)=>Number(a.demo)-Number(b.demo)||b.createdAt.localeCompare(a.createdAt))[0];if(latest && !state.selected)await selectScan(latest.id,false);}).catch(e=>toast(e.message,true));
+api('/session').then(async session=>{if (!session.authenticated || session.user?.mustChangePassword) { showLogin(Boolean(session.user?.mustChangePassword), session.user?.username || ''); return; } signedIn(session);document.dispatchEvent(new CustomEvent('obd-view',{detail:state.view}));await refresh();const latest=[...state.scans].sort((a,b)=>Number(a.demo)-Number(b.demo)||b.createdAt.localeCompare(a.createdAt))[0];if(latest && !state.selected)await selectScan(latest.id,false);}).catch(e=>toast(e.message,true));
 setInterval(refresh,2000);

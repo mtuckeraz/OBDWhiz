@@ -2,7 +2,7 @@
 
 A local diagnostic application primarily packaged for **Raspberry Pi 4 (8 GB)**, with a direct **Carista EVO → Pi Bluetooth → OBDWhiz** workflow. The Python server, SQLite history and Bluetooth connection run on the Pi. Open the web interface from a phone or laptop on the same local network. Receiver setup, Bluetooth power, pairing PINs and confirmations are handled in the browser; users do not need the Pi desktop or SSH. AI research uses an external API; no local AI model is required.
 
-The installed Pi service uses **HTTP on port 8787** in authenticated LAN mode. Open `http://YOUR_PI_HOSTNAME.local:8787` (or the Pi's IP address) and sign in with the access key printed during installation. No browser Bluetooth support or phone Bluetooth pairing is needed. Windows remains a secondary supported launch path.
+The installed Pi service uses **HTTP on port 8787** in authenticated LAN mode. Open `http://YOUR_PI_HOSTNAME.local:8787` (or the Pi's IP address) and sign in with your OBDWhiz username and password. No browser Bluetooth support or phone Bluetooth pairing is needed. Windows remains a secondary supported launch path.
 
 ## Install on Raspberry Pi
 
@@ -16,7 +16,7 @@ Run this in a Pi terminal as your normal user (not root):
 sudo apt-get update && sudo apt-get install -y git && git clone https://github.com/mtuckeraz/OBDWhiz.git "$HOME/OBDWhiz" && bash "$HOME/OBDWhiz/install-pi.sh" --service
 ```
 
-This installs Git, clones the public repository into `~/OBDWhiz`, installs all Python and Bluetooth dependencies, and starts OBDWhiz now and at boot. The destination must not already exist. The installer prints the LAN web address and a private browser access key. Share those with your users. The boot service immediately receives Bluetooth permissions, so users can complete receiver setup through the web interface without logging into the Pi. Only the installing owner needs the terminal. Log out/in only if you will run optional manual Bluetooth checks from that terminal.
+This installs Git, clones the public repository into `~/OBDWhiz`, installs all Python and Bluetooth dependencies, and starts OBDWhiz now and at boot. The destination must not already exist. The installer prints the LAN web address. New installations start with the accounts described below. The boot service immediately receives Bluetooth permissions, so users can complete receiver setup through the web interface without logging into the Pi. Only the installing owner needs the terminal. Log out/in only if you will run optional manual Bluetooth checks from that terminal.
 
 To update an existing GitHub installation, preserve `.local` and `.env` and run:
 
@@ -34,11 +34,11 @@ cd "$HOME/OBDWhiz" && git pull --ff-only && bash install-pi.sh --service
 
 ### Install from an archive
 
-Copy `obdwhiz-pi-0.4.1.tar.gz` and its `.sha256` file from this project's `output` directory to your Pi. In a Pi terminal, as your normal user:
+Copy `obdwhiz-pi-0.6.0.tar.gz` and its `.sha256` file from this project's `output` directory to your Pi. In a Pi terminal, as your normal user:
 
 ```bash
-sha256sum -c obdwhiz-pi-0.4.1.tar.gz.sha256
-tar -xzf obdwhiz-pi-0.4.1.tar.gz
+sha256sum -c obdwhiz-pi-0.6.0.tar.gz.sha256
+tar -xzf obdwhiz-pi-0.6.0.tar.gz
 cd obdwhiz
 bash install-pi.sh
 ```
@@ -62,7 +62,7 @@ For the manual launcher only, **log out and back in after installing** to apply 
 bash Start-OBDWhiz.sh --lan
 ```
 
-Keep the terminal open; stop with Ctrl+C. Read the installation key with `.venv/bin/python tools/configure_access.py`. For localhost-only development, omit `--lan` and optionally pass `--open`. Use `--port 8788` if needed. A Windows `.venv` cannot be reused on Linux: transfer the clean release archive, not the Windows environment.
+Keep the terminal open and stop with Ctrl+C. For localhost-only use, omit `--lan` and optionally pass `--open`. Use `--port 8788` if needed. Create a fresh virtual environment when moving the app from Windows to Linux.
 
 ### Optional automatic startup
 
@@ -86,7 +86,7 @@ Disable automatic startup with `sudo systemctl disable --now obdwhiz`. Re-run `b
 ### Receiver setup in a phone/laptop browser
 
 1. Connect the phone/laptop to the Pi's local network and open `http://YOUR_PI_HOSTNAME.local:8787`. The installer enables Avahi for `.local` discovery; the Pi's LAN IP also works.
-2. Sign in with the access key the owner received from the installer. The key is saved privately in `.local/access.key` and survives reinstallation. Sessions expire after 12 hours or server restart; **Sign out** revokes the current session.
+2. Sign in with your OBDWhiz account. On a new installation, `admin` and `user` each start with password `123456`. Each account must set a new password of at least 12 characters at first sign-in. Sessions expire after 12 hours or a server restart.
 3. Open **Adapter & vehicle**. Select the Pi Bluetooth radio and turn it on if needed. The installer already starts Bluetooth and grants the service device permissions.
 4. Click **Discover receivers**. Match the receiver name, Bluetooth address, signal strength and advertised services to your own adapter. A name alone is not proof that a device is an OBD receiver.
 5. Click **Pair** if your receiver requires bonding. Enter the receiver's PIN/passkey or confirm its displayed code in the web interface. Pairing never depends on a Pi desktop agent. Cancel a pending request on the same page if needed. Many BLE receivers can use **Connect** directly without pairing.
@@ -117,11 +117,11 @@ If setup needs attention:
 
 ## Automatic fleet diagnostics
 
-The Pi supports **10 enrolled Carista EVO readers**, managed under **Fleet scans**. Discover a receiver in **Adapter & vehicle**, then select **Add to fleet**. A successful manual **Connect & scan** also enrolls the reader when capacity is available and immediately initializes diagnostics and saves a code scan. Pairing is optional for many BLE readers; failed bonding does not mean direct BLE connection is unsupported. Other apps must release the receiver.
+The Pi supports **10 enrolled Carista EVO readers**, managed under **Setup → Fleet Scans**. Discover a receiver in **Adapter & vehicle**, then select **Add to fleet**. A successful manual **Connect & scan** also enrolls the reader when capacity is available and immediately initializes diagnostics and saves a code scan. Pairing is optional for many BLE readers; failed bonding does not mean direct BLE connection is unsupported. Other apps must release the receiver.
 
-The service runs a presence monitor and a single fair scan worker after boot; no browser, desktop session, or logged-in SSH user is required. Only enrolled readers are monitored automatically. Readers take turns, so ten vehicles do not require ten simultaneous Bluetooth links. The default minimum interval is **5 seconds per reader**, with actual frequency limited by initialization, scan duration and the other queued readers. Sleeping/unavailable vehicles retry after **30 seconds**. Pause/resume or change the interval in the browser. In-flight reads finish before a pause takes effect.
+The service runs a presence monitor and scans enrolled readers one at a time after boot. Each reader gets an initial scan, then a regular scan **every 24 hours** while reachable. If a reader is unreachable for **30 minutes** or longer, its return triggers a scan and restarts its regular interval. Admins can change both durations or pause automatic scanning under **Setup → Fleet Scans**. Failed scheduled attempts retry after 30 seconds while the reader is reachable. In-flight reads finish before a pause takes effect.
 
-Each automatic connection reads the VIN, monitor evidence and standard stored/pending/permanent codes (modes 03, 07 and 0A), plus supply voltage. These frequent scans skip the slower live-PID/freezeframe collection; the full manual scan remains available. A captured VIN binds the reader to its vehicle. A later VIN mismatch is recorded as a failed attempt rather than relabeling another vehicle. Missing/unsupported replies remain explicit coverage gaps.
+Each automatic connection reads the VIN, monitor evidence and standard stored/pending/permanent codes (modes 03, 07 and 0A), plus supply voltage. Automatic scans skip live-PID and freeze-frame collection. The full manual scan remains available. A captured VIN binds the reader to its vehicle. A later VIN mismatch is recorded as a failed attempt rather than relabeling another vehicle. Missing/unsupported replies remain explicit coverage gaps.
 
 Every real scan is saved in SQLite and as an immutable, UTC-datestamped JSON file:
 
@@ -131,7 +131,7 @@ Every real scan is saved in SQLite and as an immutable, UTC-datestamped JSON fil
 
 Files include raw evidence, ECU/mode coverage, reader identity and automatic trigger. Failed attempts get separately labeled files and events; they are never an all-clear scan and do not create fake vehicle cards. File-write failures retain the SQLite record and pending snapshot for recovery on restart. Existing different diagnostic files are preserved and reported. Vehicle edits and later research do not rewrite the original evidence file. Diagnostic files, reader registrations, events and access keys are private and excluded from GitHub/release archives.
 
-Bluetooth advertisements establish visits. A **90-second** signal gap is recorded as `departure_inferred`, with the latest successful scan reference; the Pi cannot distinguish departure from sleep, interference, unplugging or another app taking the reader. A new advertisement after that gap starts a new visit and requests a fresh scan. Service restarts and pauses re-establish presence rather than inventing departures during downtime. The Pi cannot guarantee a fresh scan after a car is out of range.
+Bluetooth advertisements and live connections establish presence. A signal gap is recorded as `departure_inferred` after 90 seconds by default, with a reference to the latest scan. A new signal starts a new visit. Short gaps leave the existing regular scan schedule in place. Service restarts and pauses re-establish presence. The Pi cannot distinguish departure from sleep, interference, unplugging or another app taking the reader.
 
 Code history records **first observed** and **no longer reported** timestamps. These are sampling times, not the ECU's exact fault-creation time. A code is only marked no longer reported when the same ECU returns a positive response for the same mode; an absent/unsupported ECU does not clear a code. Per-mode read timestamps and full scan start/completion times are retained to show the observation window.
 
@@ -142,7 +142,7 @@ The following authenticated APIs are ready for the future maintenance dashboard 
 | `GET /api/fleet` | Registered readers, presence, last result, errors and `scanFresh` |
 | `POST /api/fleet/readers` | Enroll/update a discovered reader with label, optional VIN and vehicle context |
 | `POST /api/fleet/remove` | Stop monitoring a reader while retaining all diagnostic history |
-| `POST /api/fleet/settings` | Enable/pause, minimum interval, retry delay and presence timeout |
+| `POST /api/fleet/settings` | Enable/pause, regular interval (`scanIntervalSeconds`), return threshold (`returnAfterSeconds`), retry delay and presence timeout |
 | `GET /api/fleet/events?after=0&limit=100` | Durable event stream with an increasing `nextCursor`; omit `after` for recent events |
 | `GET /api/scans/SCAN_ID/diagnostic` | Download the original dated JSON diagnostic file |
 
@@ -156,7 +156,7 @@ Requires Windows 10/11, Python 3.11+ and working Bluetooth. Double-click **Start
 
 ## Build a distributable Pi archive
 
-From this source directory, run `python tools/build_release.py` (or `.venv/bin/python tools/build_release.py` on Linux). This creates `output/obdwhiz-pi-0.4.1.tar.gz` plus a SHA-256 checksum. Shell scripts are packaged with Linux line endings and executable permissions.
+From this source directory, run `python tools/build_release.py` (or `.venv/bin/python tools/build_release.py` on Linux). This creates `output/obdwhiz-pi-0.6.0.tar.gz` plus a SHA-256 checksum. Shell scripts are packaged with Linux line endings and executable permissions.
 
 The archive uses an explicit source-file allowlist. It includes the application, installer, launchers, Bluetooth checker, tests and documentation. It excludes `.env`, `.local`, scan history/VINs, `.venv`, caches, screenshots and previous output. Installation downloads dependencies; this is not an offline image. Rebuilding replaces the same versioned archive.
 
@@ -186,11 +186,11 @@ All adapter operations are serialized. A timeout or transport error closes the c
 | VIN / monitor status / frame-zero evidence | Implemented where supplied; VIN reassembly currently targets CAN; freeze frames and readiness bytes are preserved raw |
 | Vehicles sorted by make/model, VIN grouping and scan history | Implemented; each VIN keeps its own scan sessions |
 | Unknown OEM code preservation, JSON imports/exports | Implemented |
-| OEM definition library | Exact make/model/year/ECU/code matching; source provenance required; supplied content remains unverified |
+| DTC reference library | Generic OBD-II definitions, model-year-specific manufacturer references, and AI-assisted import |
 | Internet-backed AI causes, checks and resolution research | Implemented integration; needs your API key and provider connectivity |
 | Complete OEM module scan across all makes | **Not implemented**. Standard OBD is not a manufacturer-wide module scan. |
 | Protected gateway access, DoIP, OEM credentials or licensed service databases | **Not provided** |
-| Tire-size coding, ECU coding, adaptation writes or actuator tests | **Not implemented**. Tire calculator and compatibility planning only. |
+| Tire-size coding, ECU coding, adaptation writes or actuator tests | **Not implemented**. |
 | Physical adapter / vehicle verification | EVO connected, initialized, completed two real standard OBD scans, and saved nine live polling cycles. This does not establish all vehicle/module coverage. |
 
 Current-generation Mercedes-Benz, BMW, Rolls-Royce, Ferrari, Lamborghini and McLaren are supported as explicit **research contexts and imported code records**, not as verified full diagnostic/coding packages. Universal access and unpublished code resolution cannot be guaranteed. OBDWhiz does not recover proprietary definitions from adapter firmware, bypass gateway authentication or fabricate manufacturer command sequences.
@@ -219,9 +219,21 @@ The Responses API performs web search and returns source citations. Reports sepa
 
 The **website** stays on HTTP. The server's outbound call to OpenAI uses HTTPS as required by that provider.
 
+## Diagnostic email alerts
+
+In **Setup → Outbound email**, enter your SMTP settings and use **Send test email** to verify delivery. SMTP supports STARTTLS and implicit TLS. The Pi keeps the configuration with its local database.
+
+In **Notifications**, create a rule with one or more recipients and the codes that must appear together in the same live scan. Rules apply to manual, fleet and scanner-job scans. For an identified vehicle, another alert is sent when the combination returns after a complete scan without it. Use **Recent delivery activity** to check queued alerts, retries and mail server acceptance.
+
+Enable **Include AI-suggested next steps** on individual rules to use the OpenAI key and model configured in Setup. Email can still be delivered if AI suggestions are unavailable.
+
 ## OEM imports
 
-OBDWhiz imports JSON in its own schema; arbitrary Carista/Xentry/ISTA/vendor PDFs and exports need conversion first. Preserve module names, raw codes, fault status and source coverage. In **OEM reference library**, use **Show scan JSON format** for the schema.
+The **DTC reference library** includes 9,533 generic definitions from [OBDex (CC0)](https://github.com/foerbsnavi/obdex) and a starter set of source-linked manufacturer definitions for BMW, Chevrolet, Ferrari, Ford, Hyundai, Jeep, Lamborghini, McLaren, Mercedes-Benz and Rolls-Royce. Generic codes have no make, model or year restriction. Manufacturer references list their model-year scope and any source-specific conditions.
+
+Choose **Extract definitions with AI** to process a text, CSV, TSV or JSON source. Enter default vehicle details if the source omits them. Review the extracted rows before saving. Each OEM definition requires a make, model, model-year range, code and description. Setup must have an OpenAI API key and model that supports JSON responses. The source goes to OpenAI and API charges may apply.
+
+For a diagnostic scan import, use **Show scan JSON format** for the required schema. Preserve module names, raw codes, fault status and source coverage.
 
 Minimum scan:
 
@@ -249,13 +261,13 @@ Definitions require provenance and match exact model/ECU context:
 }
 ```
 
-The example URL above is a placeholder, not an OEM database. No licensed definitions are bundled. Library matching does not verify a code against ECU firmware versions; keep software applicability in the reference description and verify it before use.
+The example URL is a placeholder. Use the source reference to check software and ECU applicability before relying on a definition.
 
 ## Storage and security
 
 SQLite data lives in `.local/apex.sqlite3`. This legacy filename, the internal `X-Apex-Client` header and browser storage keys are retained to preserve existing installations; the application is named OBDWhiz. Up to 10,000 polling cycles are retained per scan; UI/JSON exports return the most recent 200. Scan snapshots and their request/response traces remain saved. The runtime adapter trace is bounded to 2,000 entries. Export JSON includes VIN/raw evidence, so review it before sharing.
 
-The installed service listens on the LAN and requires a shared access key for all private API routes, including Bluetooth operations, even from localhost. Static sign-in assets are public. Sessions use HttpOnly/SameSite cookies, failed sign-ins are rate limited, Host names are limited to the Pi hostname or the receiving interface address, cross-origin requests are blocked, and mutations require a custom header. It does not expose keys through its API. HTML is escaped and report/source links are restricted to HTTP(S). No remote scripts, fonts or analytics are loaded. This is a shared local workbench, not separate per-user accounts: signed-in users share receiver control and scan history. Use it on a trusted local network; HTTP does not encrypt traffic. Do not expose it through public router port forwarding. The access key and Bluetooth receiver preferences live under the ignored `.local` directory; pairing PINs are not saved by OBDWhiz.
+The installed service listens on the LAN and requires account sign-in for all private API routes, including Bluetooth operations, even from localhost. Static sign-in assets are public. Sessions use HttpOnly/SameSite cookies, failed sign-ins are rate limited, Host names are limited to the Pi hostname or the receiving interface address, cross-origin requests are blocked, and mutations require a custom header. It does not expose keys through its API. HTML is escaped and report/source links are restricted to HTTP(S). No remote scripts, fonts or analytics are loaded. Named accounts share receiver control and scan history. Administrators can manage accounts, settings and existing vehicle details. Users can view records, run diagnostics and contribute evidence. Use it on a trusted local network; HTTP does not encrypt traffic. Do not expose it through public router port forwarding. Bluetooth receiver preferences live under the ignored `.local` directory.
 
 ## Validation
 
@@ -282,3 +294,17 @@ Tests also cover multi-ECU CAN frames, CAN DTC counts, ISO-TP VIN assembly, inco
 - [pySerial: port enumeration](https://pyserial.readthedocs.io/en/latest/tools.html) — COM port discovery.
 - [python-OBD command definitions](https://github.com/brendan-w/python-OBD/blob/master/obd/commands.py) — corroborating standard counter and PID 5B decoder labels.
 - [OpenAI: web search](https://developers.openai.com/api/docs/guides/tools-web-search) — Responses API search and citation handling.
+
+## Vehicle Scans (Phase 1 testing)
+
+Open **Vehicle Scans** to search by VIN, plate, owner or vehicle details. Add a draft vehicle, take or upload photos, and attach documents. Create named accounts under **Setup → Staff and location policy**. See [Deployment](DEPLOYMENT.md) for private storage, HTTPS and backups, and [Testing](TESTING.md) for the shop acceptance workflow.
+
+## Scanner registry and diagnostic history
+
+Open **Scanner Inventory** to register a BLE address or serial port, or connect through **Adapter & vehicle** to register the hardware automatically. The scanner keeps its OBD number and QR label when moved. Generate the QR label from the LAN address staff will use. It opens an authenticated scanner profile.
+
+Choose **Read and verify VIN** to identify the connected vehicle. Matching VINs open existing dossiers. A newly detected VIN can create a minimal dossier, and an administrator can confirm attaching a verified VIN to a selected draft. A move or an occupied assignment goes to administrator review. VIN-less vehicles can have an unverified assignment. Their dossier scan stays blocked until the adapter reports the VIN.
+
+From a dossier, queue a scan with **Run diagnostic scan**. The worker uses the same Bluetooth or serial transport and connection lock as the existing app. A pending request survives a restart. An interrupted scan is marked failed and can be requested again. The original diagnostic file captures the scanner and vehicle associations as they were at scan time. Comparison results account for the ECU and mode coverage of both scans.
+
+Generic BLE scanners with several possible UART pairs need initialization on the existing adapter screen before a queued scan. Rotating Bluetooth addresses require an OS-provided stable identity. Standard OBD data availability varies by vehicle. Phase 2 provides VIN-based identity without an external VIN decoder. Fleet cadence and notifications remain Phase 3.

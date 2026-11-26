@@ -216,7 +216,13 @@ class Adapter:
                 raise ConnectionError('Response exceeded the diagnostic buffer.')
         raise TimeoutError('Serial response timed out')
 
-    async def scan(self, vehicle, *, codes_only=False):
+    async def read_vin(self):
+        async with self.operation:
+            if not self.state['ready']:
+                raise ValueError('Initialize the adapter before reading the VIN.')
+            return obd.vin(await self.command('0902'), self.protocol, require_consensus=True)
+
+    async def scan(self, vehicle, *, codes_only=False, require_verified_vin=False, job_id=None):
         validated = validate_scan({'vehicle': dict(vehicle), 'codes': []})
         vehicle = validated['vehicle']
         expected_vin = validated.get('vin')
@@ -224,15 +230,26 @@ class Adapter:
             if not self.state['ready']:
                 raise ValueError('Initialize the adapter with ignition on first.')
             trace_start = len(self.trace)
+            started = now()
             record = {'vehicle': vehicle, 'source': 'Carista EVO / ELM-compatible', 'demo': False,
                       'protocol': self.protocol, 'codes': [], 'readings': [], 'warnings': [],
                       'supported': self.state['supported'], 'codeCoverage': {}, 'codeReadAt': {},
                       'scope': 'Standard emissions OBD-II; not a full manufacturer module scan.'}
-            detected_vin = obd.vin(await self.command('0902'), self.protocol)
+            detected_vin = obd.vin(await self.command('0902'), self.protocol, require_consensus=require_verified_vin)
+            if require_verified_vin and not detected_vin:
+                raise ValueError('The vehicle stopped reporting its VIN. No scan was attributed to the dossier.')
             if detected_vin and expected_vin and detected_vin != expected_vin:
                 raise ValueError('The connected vehicle VIN does not match the selected vehicle. Select the correct vehicle or clear the VIN field before scanning.')
             record['vin'] = detected_vin or expected_vin
             record['vinSource'] = 'obd' if detected_vin else 'manual' if expected_vin else 'unavailable'
+            if self.connection_address and self.state.get('transport') in ('serial', 'ble'):
+                record['scannerEvidence'] = {'address': self.connection_address, 'transport': self.state['transport'],
+                                             'name': str(self.state.get('device') or self.connection_address)[:120]}
+            record['startedAt'] = started
+            record['adapterIdentity'] = self.state.get('identity')
+            if job_id:
+                record['scanJobId'] = job_id
+                record['trigger'] = 'scanner_job'
             if not detected_vin:
                 record['warnings'].append('The vehicle did not return a VIN. ' + ('Using the manually entered VIN.' if expected_vin else 'VIN has not been captured for this scan.'))
             record['monitors'] = obd.monitor(await self.command('0101'), self.protocol)
@@ -245,7 +262,7 @@ class Adapter:
                 if not any(r['data'] and r['data'][0] == expected for r in parsed):
                     record['warnings'].append(f'Mode {mode} did not provide a valid positive response; coverage is incomplete.')
                 record['codes'].extend(obd.dtcs(raw, mode, self.protocol))
-            for pid in ('04', '05', '0C', '0D', '42', '21', '30', '31', '5B'):
+            for pid in ('04', '05', '0C', '0D', '42', '21', '2F', '30', '31', '5B'):
                 if not codes_only and any(pid in values for values in self.state['supported'].values()):
                     record['readings'].extend(obd.readings(await self.command('01' + pid), pid, self.protocol))
             record['readings'].extend(obd.supply_voltage(await self.command('ATRV')))

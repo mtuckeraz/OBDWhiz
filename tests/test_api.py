@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from server import create_app
 
 
@@ -32,7 +33,8 @@ class ApiTests(unittest.TestCase):
         connection = http.client.HTTPConnection('127.0.0.1', self.port, timeout=10)
         outgoing = {'X-Apex-Client': '1', 'Content-Type': 'application/json'}
         outgoing.update(headers or {})
-        connection.request(method or ('POST' if body is not None else 'GET'), path, json.dumps(body) if body is not None else None, outgoing)
+        payload = json.dumps(body) if body is not None and not isinstance(body, bytes) else body
+        connection.request(method or ('POST' if body is not None else 'GET'), path, payload, outgoing)
         response = connection.getresponse()
         result = response.status, response.getheaders(), response.read()
         connection.close()
@@ -79,10 +81,56 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn(b'Demo', body)
 
+    def test_definition_uploads_accept_json_and_csv(self):
+        record = {'make': 'BMW', 'model': '750e', 'yearFrom': 2025, 'yearTo': 2026, 'ecu': 'DME',
+                  'code': 'P0300', 'description': 'Example', 'sourceUrl': 'https://example.com/service',
+                  'reference': 'Test only'}
+        for body in ({'definitions': [record]}, [record]):
+            status, _, payload = self.request('/api/definitions', body)
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(payload), {'count': 1})
+
+        header = 'make,model,yearFrom,yearTo,ecu,code,description,sourceUrl,reference\r\n'
+        row = 'BMW,750e,2025,2026,DME,p0301,"Misfire, cylinder 1\r\nSee manual",https://example.com/service,"Page ""1"""\r\n'
+        headers = {'Content-Type': 'text/csv; charset=utf-8'}
+        status, _, payload = self.request('/api/definitions', (header + row + 'BMW,750e').encode(), headers)
+        self.assertEqual(status, 400)
+        self.assertIn(b'wrong number of columns', payload)
+        saved = json.loads(self.request('/api/definitions')[2])
+        self.assertNotIn('P0301', {definition['code'] for definition in saved})
+
+        status, _, payload = self.request('/api/definitions', (header + row).encode('utf-8-sig'), headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(payload), {'count': 1})
+        saved = json.loads(self.request('/api/definitions')[2])
+        csv_definition = next(definition for definition in saved if definition['code'] == 'P0301')
+        self.assertEqual(csv_definition['yearFrom'], 2025)
+        self.assertEqual(csv_definition['description'], 'Misfire, cylinder 1\r\nSee manual')
+        self.assertEqual(csv_definition['reference'], 'Page "1"')
+
     def test_uninitialized_scan_returns_actionable_error(self):
         status, _, body = self.request('/api/scan', {'vehicle': {'make': 'BMW', 'model': 'Test', 'year': 2026}})
         self.assertEqual(status, 400)
         self.assertIn(b'Initialize', body)
+
+    def test_ai_definition_extraction_requires_approval_to_save(self):
+        record = {'make': 'Ferrari', 'model': 'Import test', 'yearFrom': 2023, 'yearTo': 2024,
+                  'code': 'P1999', 'description': 'Example fault'}
+        response = {'status': 'completed', 'output': [{'content': [
+            {'type': 'output_text', 'text': json.dumps({'definitions': [record, {'code': 'P1999'}]})}]}]}
+        self.request('/api/settings', {'apiKey': 'test-extraction-key'})
+        self.addCleanup(self.request, '/api/settings', {'clearKey': True})
+        with patch('core.research.Research._request', return_value=response):
+            status, _, body = self.request('/api/definitions/extract', {'source': 'P1999 - Example fault'})
+        self.assertEqual(status, 200)
+        staged = json.loads(body)
+        self.assertEqual(staged['skipped'], 1)
+        self.assertEqual(len(staged['definitions']), 1)
+        path = '/api/definitions/catalog?q=Ferrari%20P1999'
+        self.assertEqual(json.loads(self.request(path)[2])['total'], 0)
+        status, _, _ = self.request('/api/definitions/approve', {'definitions': staged['definitions']})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(self.request(path)[2])['total'], 1)
 
     def test_missing_scan_and_bad_schema(self):
         self.assertEqual(self.request('/api/scans/00000000-0000-0000-0000-000000000000')[0], 404)

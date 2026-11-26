@@ -11,7 +11,8 @@ def utcnow():
     return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
-DEFAULTS = {'enabled': True, 'scanIntervalSeconds': 5, 'retrySeconds': 30, 'presenceTimeoutSeconds': 90}
+DEFAULTS = {'enabled': True, 'scanIntervalSeconds': 24 * 60 * 60, 'returnAfterSeconds': 30 * 60,
+            'retrySeconds': 30, 'presenceTimeoutSeconds': 90}
 
 
 class FleetStore:
@@ -33,7 +34,11 @@ class FleetStore:
     def settings(self):
         with self.lock:
             row = self.db.execute('SELECT data FROM fleet_settings WHERE id=1').fetchone()
-        return {**DEFAULTS, **(json.loads(row[0]) if row else {})}
+        saved = json.loads(row[0]) if row else {}
+        if 'returnAfterSeconds' not in saved:
+            # The previous interval controlled continuous polling. Start legacy installs on the new schedule.
+            saved.pop('scanIntervalSeconds', None)
+        return {**DEFAULTS, **saved}
 
     def configure(self, changes):
         settings = self.settings()
@@ -41,7 +46,9 @@ class FleetStore:
             if not isinstance(changes['enabled'], bool):
                 raise ValueError('Fleet enabled must be true or false.')
             settings['enabled'] = changes['enabled']
-        for key, low, high in (('scanIntervalSeconds', 5, 3600), ('retrySeconds', 15, 600), ('presenceTimeoutSeconds', 30, 600)):
+        limits = (('scanIntervalSeconds', 5, 2_592_000), ('returnAfterSeconds', 60, 2_592_000),
+                  ('retrySeconds', 15, 600), ('presenceTimeoutSeconds', 30, 600))
+        for key, low, high in limits:
             if key in changes:
                 value = changes[key]
                 if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
@@ -85,9 +92,10 @@ class FleetStore:
                 raise ValueError('The fleet supports up to 10 readers. Remove a reader before adding another.')
             reader = previous or {'address': address, 'createdAt': utcnow(), 'enabled': True, 'presence': 'unknown',
                 'visitId': None, 'lastSeenAt': None, 'lastScanAt': None, 'lastScanId': None,
-                'lastAttemptAt': None, 'lastError': None, 'lastScanStatus': 'waiting'}
+                'lastAttemptAt': None, 'lastError': None, 'lastScanStatus': 'waiting', 'returnScanDueAt': None}
             if previous and 'vin' in spec and vin != previous.get('vin'):
-                reader.update(lastScanAt=None, lastScanId=None, lastAttemptAt=None, lastError=None, lastScanStatus='waiting')
+                reader.update(lastScanAt=None, lastScanId=None, lastAttemptAt=None, lastError=None,
+                              lastScanStatus='waiting', returnScanDueAt=None)
                 self.event(address, 'vehicle_assignment_changed', {'previousVin': previous.get('vin'), 'vin': vin})
             reader.update(controller=controller, name=spec.get('name', previous.get('name') if previous else 'Carista'),
                           label=spec.get('label') or reader.get('label') or spec.get('name') or address)
@@ -135,19 +143,33 @@ class FleetStore:
         events = [{'seq': r[0], 'createdAt': r[1], 'address': r[2], 'type': r[3], **json.loads(r[4])} for r in rows]
         return {'events': events, 'nextCursor': events[-1]['seq'] if events else after or 0}
 
-    def observe(self, address, timestamp=None):
+    def observe(self, address, timestamp=None, *, return_after=None):
         timestamp = timestamp or utcnow()
-        reader = self.reader(address)
-        if not reader or not reader['enabled']:
-            return None
-        if reader['presence'] != 'present':
-            previous = reader['presence']
-            reader.update(presence='present', visitId=str(uuid.uuid4()), lastAttemptAt=None)
-            self.event(address, 'return_observed' if previous == 'absent' else 'presence_observed',
-                       {'visitId': reader['visitId'], 'observation': 'Bluetooth advertisement, not a GPS location'}, timestamp)
-        reader['lastSeenAt'] = timestamp
-        self.put(reader)
-        return reader
+        with self.lock:
+            reader = self.reader(address)
+            if not reader or not reader['enabled']:
+                return None
+            last_seen = reader.get('lastSeenAt')
+            elapsed = (dt.datetime.fromisoformat(timestamp) - dt.datetime.fromisoformat(last_seen)).total_seconds() if last_seen else 0
+            if elapsed < 0:
+                return reader
+            if return_after is None:
+                return_after = self.settings()['returnAfterSeconds']
+            qualifies = reader['presence'] in ('present', 'absent') and elapsed >= return_after
+            if reader['presence'] == 'present' and qualifies:
+                self.mark_absent(reader, timestamp)
+            if reader['presence'] != 'present':
+                previous = reader['presence']
+                reader.update(presence='present', visitId=str(uuid.uuid4()))
+                if qualifies:
+                    reader['returnScanDueAt'] = timestamp
+                details = {'visitId': reader['visitId'], 'observation': 'Bluetooth signal or live connection, not a GPS location'}
+                if previous == 'absent':
+                    details.update(unreachableSeconds=round(elapsed, 1), returnScanDue=qualifies)
+                self.event(address, 'return_observed' if previous == 'absent' else 'presence_observed', details, timestamp)
+            reader['lastSeenAt'] = timestamp
+            self.put(reader)
+            return reader
 
     def mark_absent(self, reader, timestamp=None):
         timestamp = timestamp or utcnow()
@@ -183,6 +205,7 @@ class FleetStore:
             reader['vin'] = scan['vin']
         reader['vehicle'] = dict(scan['vehicle'])
         reader.update(lastScanAt=scan['createdAt'], lastScanId=scan['id'],
+                      returnScanDueAt=None,
                       lastCodeCount=len(scan['codes']), lastCodeCoverage=scan.get('codeCoverage', {}),
                       lastScanStatus='complete' if all(scan.get('codeCoverage', {}).get(m) for m in ('03', '07', '0A')) else 'partial',
                       lastError=scan.get('diagnosticFileError'))

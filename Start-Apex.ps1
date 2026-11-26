@@ -5,7 +5,7 @@ if (-not (Test-Path -LiteralPath $pythonPath)) {
     python -m venv .venv
     if ($LASTEXITCODE -ne 0) { throw 'Python 3.11 or newer is required.' }
 }
-& $pythonPath -c "import bleak, serial"
+& $pythonPath -c "import bleak, serial, PIL, pillow_heif, qrcode"
 if ($LASTEXITCODE -ne 0) {
     & $pythonPath -m pip install -r requirements.txt
     if ($LASTEXITCODE -ne 0) { throw 'Bluetooth dependency installation failed.' }

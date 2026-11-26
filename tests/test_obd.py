@@ -28,6 +28,19 @@ class DecoderTests(unittest.TestCase):
         self.assertIsNone(obd.vin(raw))
         self.assertEqual(obd.payloads(raw), [])
 
+    def test_vin_verification_rejects_conflicting_ecu_responses(self):
+        def response(ecu, vin):
+            data = b'\x49\x02\x01' + vin.encode('ascii')
+            return '\r'.join(f'{ecu} {header} {chunk.hex(" ")}' for header, chunk in (
+                ('10 14', data[:6]), ('21', data[6:13]), ('22', data[13:])))
+
+        first, second = 'WBA12345678901234', 'WBA12345678901235'
+        raw = response('7E8', first) + '\r' + response('7E9', second)
+        with self.assertRaisesRegex(ValueError, 'conflicting VINs'):
+            obd.vin(raw, require_consensus=True)
+        both_match = response('7E8', first) + '\r' + response('7E9', first)
+        self.assertEqual(obd.vin(both_match, require_consensus=True), first)
+
     def test_29_bit_compact_can(self):
         row = obd.readings('18DAF11004410C1F40000000', '0C', '7')[0]
         self.assertEqual(row['ecu'], '18DAF110')

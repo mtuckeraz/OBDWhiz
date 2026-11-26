@@ -1,7 +1,7 @@
 from pathlib import Path
 import tempfile
 import unittest
-from core.store import Store, normalize_vin, validate_scan
+from core.store import Store, definition_source_batches, normalize_vin, validate_scan
 
 
 class StoreTests(unittest.TestCase):
@@ -39,6 +39,41 @@ class StoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.import_definitions({'definitions': [record, {'code': 'bad'}]})
         self.assertEqual(self.store.definitions(), [])
+
+    def test_catalog_seeds_once_and_preserves_vehicle_scope(self):
+        self.store.load_dtc_catalog()
+        self.store.load_dtc_catalog()
+        self.assertEqual(self.store.definition_page()['total'], 9660)
+        self.assertEqual(len(self.store.definition_page()['records']), 50)
+        self.assertEqual(self.store.definition_page('Ferrari 488 P1902')['total'], 2)
+        codes = [{'code': 'P1B77', 'ecu': None}, {'code': 'P0420', 'ecu': '7E8'}]
+        ev = self.store.matches({'vehicle': {'make': 'Hyundai', 'model': 'IONIQ 5', 'year': 2024}, 'codes': codes})
+        self.assertEqual([item['code'] for item in ev], ['P1B77', 'P0420'])
+        hybrid = self.store.matches({'vehicle': {'make': 'Hyundai', 'model': 'IONIQ Hybrid', 'year': 2019}, 'codes': codes})
+        self.assertNotEqual(ev[0]['description'], hybrid[0]['description'])
+        future = self.store.matches({'vehicle': {'make': 'Hyundai', 'model': 'IONIQ 5', 'year': 2030}, 'codes': codes})
+        self.assertEqual([item['code'] for item in future], ['P0420'])
+
+    def test_flexible_source_batches_preserve_quoted_csv_rows_and_json_context(self):
+        csv_source = 'Fault;Meaning\n' + '\n'.join(f'P{1000+i};"Line one\nLine two"' for i in range(80))
+        batches = definition_source_batches({'source': csv_source, 'format': 'csv'})
+        self.assertGreater(len(batches), 1)
+        self.assertTrue(all('["Fault", "Meaning"]' in batch for batch in batches))
+        self.assertIn('Line one\\nLine two', batches[0])
+        source = '{"brand":"Ferrari","dtcs":[{"id":"P1902","definition":"Pressure high"}]}'
+        batch, = definition_source_batches({'source': source, 'format': 'json'})
+        self.assertIn('"brand": "Ferrari"', batch)
+        self.assertIn('"id": "P1902"', batch)
+
+    def test_reviewed_source_can_be_saved_with_required_fields_only(self):
+        record = {'make': 'Jeep', 'model': 'Test Wrangler', 'yearFrom': 2025, 'yearTo': 2026,
+                  'code': 'p1d72-00', 'description': 'Open high-voltage cable'}
+        self.store.import_definitions({'definitions': [record]}, source_import=True)
+        self.store.import_definitions({'definitions': [record]}, source_import=True)
+        scan = {'vehicle': {'make': 'Jeep', 'model': 'Test Wrangler', 'year': 2025},
+                'codes': [{'code': 'P1D72-00', 'ecu': 'HCP'}]}
+        saved, = self.store.matches(scan)
+        self.assertIn('unverified', saved['origin'])
 
     def test_schema_rejects_invalid_nested_input(self):
         for data in ({}, {'vehicle': [], 'codes': []}, {'vehicle': {}, 'codes': ['P0300']}, {'vehicle': {'year': 9999}, 'codes': []}):

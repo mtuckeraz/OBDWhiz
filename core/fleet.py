@@ -52,7 +52,7 @@ class Fleet:
         settings = self.data.configure(changes)
         if settings['enabled'] != previous['enabled']:
             for reader in self.data.readers():
-                reader.update(presence='unknown', visitId=None, lastAttemptAt=None)
+                reader.update(presence='unknown', visitId=None)
                 self.data.put(reader)
             self.seen.clear()
             self.pending_seen.clear()
@@ -169,9 +169,10 @@ class Fleet:
                 self.pending_seen[address] = utcnow()
         pending, self.pending_seen = self.pending_seen, {}
         for address, timestamp in pending.items():
-            self.data.observe(address, timestamp)
+            self.data.observe(address, timestamp, return_after=settings['returnAfterSeconds'])
         for reader in self.data.readers():
-            if reader['presence'] == 'present' and now - self.seen.get(reader['address'], now) > settings['presenceTimeoutSeconds']:
+            if reader['presence'] == 'present' and now - self.seen.get(reader['address'], now) > min(
+                    settings['presenceTimeoutSeconds'], settings['returnAfterSeconds']):
                 self.data.mark_absent(reader)
 
     def due_reader(self):
@@ -180,12 +181,18 @@ class Fleet:
             return None
         candidates = []
         for reader in self.data.readers():
-            if not reader['enabled'] or reader['presence'] != 'present':
+            if not reader['enabled'] or reader['presence'] != 'present' or reader['lastScanStatus'] == 'scanning':
                 continue
-            elapsed = age(reader.get('lastAttemptAt'))
-            delay = settings['retrySeconds'] if reader['lastScanStatus'] == 'error' or reader.get('lastError') else settings['scanIntervalSeconds']
-            if elapsed is None or elapsed >= delay:
-                candidates.append(reader)
+            last_attempt = reader.get('lastAttemptAt')
+            return_due = reader.get('returnScanDueAt')
+            since_scan = age(reader.get('lastScanAt'))
+            if not return_due and since_scan is not None and since_scan < settings['scanIntervalSeconds']:
+                continue
+            new_return = return_due and (not last_attempt or return_due > last_attempt)
+            if reader['lastScanStatus'] == 'error' and last_attempt and not new_return and age(last_attempt) < settings['retrySeconds']:
+                continue
+            trigger = 'return_after_absence' if return_due else 'return_or_first_contact' if since_scan is None else 'continuous'
+            candidates.append({**reader, 'scanTrigger': trigger})
         return min(candidates, key=lambda r: r.get('lastAttemptAt') or '') if candidates else None
 
     async def run(self):
@@ -204,7 +211,7 @@ class Fleet:
                     self.presence_tick()
                     reader = self.due_reader()
                     if reader and not (self.manual_task and not self.manual_task.done()) and not (self.bluetooth.task and not self.bluetooth.task.done()):
-                        await self.scan_one(reader, 'return_or_first_contact' if not reader.get('lastAttemptAt') else 'continuous')
+                        await self.scan_one(reader, reader['scanTrigger'])
                 await asyncio.sleep(1)
             except asyncio.CancelledError:
                 raise
@@ -221,8 +228,12 @@ class Fleet:
             return
         if spec.get('transport') == 'ble' and not reader:
             device = self.manual.device_cache.get(spec['id'])
-            path = (getattr(device, 'details', None) or {}).get('path', '')
-            controller = path.rsplit('/', 1)[0] if '/dev_' in path else self.bluetooth.controller
+            details = getattr(device, 'details', None)
+            # Only BlueZ supplies a D-Bus path. Windows supplies RawAdvData.
+            path = details.get('path') if isinstance(details, dict) else None
+            controller = None
+            if isinstance(path, str):
+                controller = path.rsplit('/', 1)[0] if '/dev_' in path else self.bluetooth.controller
             if controller:
                 try:
                     reader = self.data.register({'address': address, 'name': spec.get('name') or address, 'controller': controller,
@@ -247,6 +258,8 @@ class Fleet:
             'source': 'Automatic fleet scan attempt', 'scanStatus': 'failed',
             'scope': 'Attempt failed; no all-clear result and no verified vehicle identity.',
             'warnings': [str(error)], 'trace': list(trace),
+            'scannerEvidence': {'transport': reader.get('transport', 'ble'), 'address': reader['address'],
+                                'name': reader['label']} if reader.get('transport') or reader.get('controller') else None,
             'reader': {'address': reader['address'], 'label': reader['label']},
             'automation': {'trigger': trigger, 'visitId': reader.get('visitId'), 'startedAt': started,
                            'expectedVin': reader.get('vin'), 'kind': 'failed_attempt'}})
@@ -266,7 +279,8 @@ class Fleet:
             if not connection_id and self.manual_task and not self.manual_task.done():
                 return
             registered = self.data.reader(address)
-            if not connection_id and (not registered or not registered['enabled'] or not self.data.settings()['enabled']):
+            if not connection_id and (not registered or not registered['enabled'] or registered['presence'] != 'present'
+                                      or not self.data.settings()['enabled']):
                 return
             reader = registered or reader
             self.state.update(busyReader=address, lastError=None)
@@ -301,6 +315,9 @@ class Fleet:
                     vehicle.setdefault('model', 'Connected vehicle')
                     if reader.get('vin'):
                         vehicle['vin'] = reader['vin']
+                    check_vin = getattr(self, 'require_verified_vin', None)
+                    if check_vin and check_vin(address):
+                        return await session.scan(vehicle, codes_only=True, require_verified_vin=True)
                     return await session.scan(vehicle, codes_only=True)
 
                 scan = await asyncio.wait_for(execute(), timeout=120)

@@ -106,6 +106,21 @@ class FleetStoreTests(unittest.TestCase):
         self.fleet.remove(reader['address'])
         self.assertTrue(any(e['type'] == 'test_event' for e in self.fleet.events()['events']))
 
+    def test_legacy_schedule_uses_new_defaults_and_configured_durations_persist(self):
+        with self.store.db:
+            self.store.db.execute('INSERT INTO fleet_settings VALUES(1,?)',
+                                  (json.dumps({'enabled': False, 'scanIntervalSeconds': 15}),))
+        settings = self.fleet.settings()
+        self.assertFalse(settings['enabled'])
+        self.assertEqual(settings['scanIntervalSeconds'], 86400)
+        self.assertEqual(settings['returnAfterSeconds'], 1800)
+        self.fleet.configure({'scanIntervalSeconds': 43200, 'returnAfterSeconds': 900})
+        self.fleet.configure({'enabled': True})
+        settings = FleetStore(self.store).settings()
+        self.assertTrue(settings['enabled'])
+        self.assertEqual(settings['scanIntervalSeconds'], 43200)
+        self.assertEqual(settings['returnAfterSeconds'], 900)
+
 
 class FakeReader(Adapter):
     connected_count = 0
@@ -243,6 +258,22 @@ class FleetEngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.store.diagnostic_file(record['id']).exists())
         self.assertTrue(self.manual.state['connected'])
 
+    async def test_windows_advertisement_details_follow_the_manual_scan_path(self):
+        from collections import namedtuple
+
+        address = spec()['address']
+        RawAdvData = namedtuple('RawAdvData', 'adv scan')
+        self.manual.device_cache[address] = SimpleNamespace(details=RawAdvData(object(), None))
+        request = {'id': address, 'name': 'Windows BLE scanner', 'transport': 'ble'}
+        await self.manual.connect(request)
+        await self.fleet.manual_connected(request)
+        await self.fleet.manual_task
+
+        self.assertIsNone(self.fleet.data.reader(address))
+        scans = self.store.list()
+        self.assertEqual(len(scans), 1)
+        self.assertEqual(self.store.get(scans[0]['id'])['automation']['trigger'], 'manual_connection')
+
     async def test_signal_loss_debounces_once_and_return_gets_a_new_visit(self):
         reader = self.enroll()
         original_visit = reader['visitId']
@@ -256,6 +287,61 @@ class FleetEngineTests(unittest.IsolatedAsyncioTestCase):
         returned = self.fleet.data.observe(reader['address'])
         self.assertNotEqual(returned['visitId'], original_visit)
         self.assertIsNone(returned['lastAttemptAt'])
+
+    async def test_return_after_short_gap_keeps_schedule_and_long_gap_triggers_one_scan(self):
+        reader = self.fleet.data.register(spec())
+        address = reader['address']
+        now = dt.datetime.now(dt.timezone.utc)
+        last_scan = (now - dt.timedelta(hours=1)).isoformat()
+        last_seen = (now - dt.timedelta(minutes=59)).isoformat()
+        reader = self.fleet.data.observe(address, last_seen)
+        reader.update(lastScanAt=last_scan, lastAttemptAt=last_scan, lastScanStatus='complete')
+        self.fleet.data.put(reader)
+        self.fleet.data.mark_absent(reader)
+        short = self.fleet.data.observe(address, (now - dt.timedelta(minutes=30)).isoformat())
+        self.assertEqual(short['lastAttemptAt'], last_scan)
+        self.assertIsNone(self.fleet.due_reader())
+        # A return can arrive before the monitor has processed the next presence tick.
+        self.fleet.data.observe(address, now.isoformat())
+        due = self.fleet.due_reader()
+        self.assertEqual(due['scanTrigger'], 'return_after_absence')
+        self.fleet.devices[(address, RADIO)] = SimpleNamespace(address=address)
+        await self.fleet.scan_one(due, due['scanTrigger'])
+        self.assertIsNone(self.fleet.due_reader())
+        events = [e for e in self.fleet.data.events()['events'] if e['type'] == 'return_observed']
+        self.assertEqual([e['returnScanDue'] for e in events], [False, True])
+
+    async def test_regular_schedule_uses_last_saved_scan_and_honors_changed_interval(self):
+        reader = self.enroll()
+        now = dt.datetime.now(dt.timezone.utc)
+        reader.update(lastScanAt=(now - dt.timedelta(hours=23)).isoformat(),
+                      lastAttemptAt=(now - dt.timedelta(hours=25)).isoformat(), lastScanStatus='complete')
+        self.fleet.data.put(reader)
+        self.assertIsNone(self.fleet.due_reader())
+        self.fleet.configure({'scanIntervalSeconds': 12 * 60 * 60})
+        self.assertEqual(self.fleet.due_reader()['scanTrigger'], 'continuous')
+        self.fleet.configure({'scanIntervalSeconds': 24 * 60 * 60})
+        reader['lastScanAt'] = (now - dt.timedelta(hours=24, seconds=1)).isoformat()
+        self.fleet.data.put(reader)
+        self.assertEqual(self.fleet.due_reader()['scanTrigger'], 'continuous')
+
+    async def test_failed_return_scan_retries_without_resetting_the_regular_timer(self):
+        address = self.fleet.data.register(spec())['address']
+        now = dt.datetime.now(dt.timezone.utc)
+        reader = self.fleet.data.observe(address, (now - dt.timedelta(minutes=20)).isoformat())
+        reader.update(lastScanAt=reader['lastSeenAt'], lastScanStatus='complete')
+        self.fleet.data.put(reader)
+        self.fleet.configure({'returnAfterSeconds': 15 * 60})
+        self.fleet.data.observe(address, now.isoformat())
+        self.assertEqual(self.fleet.due_reader()['scanTrigger'], 'return_after_absence')
+        self.fleet.data.scan_started(address, 'return_after_absence')
+        self.fleet.data.scan_failed(address, 'ECU asleep', 'return_after_absence')
+        self.assertIsNone(self.fleet.due_reader())
+        reader = self.fleet.data.reader(address)
+        reader['lastAttemptAt'] = (now - dt.timedelta(seconds=31)).isoformat()
+        reader['returnScanDueAt'] = (now - dt.timedelta(seconds=32)).isoformat()
+        self.fleet.data.put(reader)
+        self.assertEqual(self.fleet.due_reader()['scanTrigger'], 'return_after_absence')
 
     async def test_oldest_due_reader_wins_and_failed_reader_does_not_starve_others(self):
         first, second = self.enroll(0), self.enroll(1)

@@ -3,3 +3,6 @@
 # Bleak installs its Linux D-Bus Python backend transitively.
 bleak==3.0.2
 pyserial==3.5
+Pillow==12.3.0
+pillow-heif==1.8.1
+qrcode==8.2

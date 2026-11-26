@@ -1,4 +1,7 @@
+import csv
 import datetime as dt
+import hashlib
+import io
 import json
 import math
 import os
@@ -8,6 +11,75 @@ import sqlite3
 import threading
 import tempfile
 import uuid
+
+DEFINITION_TEXT_FIELDS = ('make', 'model', 'ecu', 'code', 'description', 'sourceUrl', 'reference')
+DEFINITION_COLUMNS = (*DEFINITION_TEXT_FIELDS, 'yearFrom', 'yearTo')
+MAX_DEFINITIONS = 5000
+DTC_DATA = Path(__file__).resolve().parents[1] / 'data'
+
+
+def definition_source_batches(data):
+    source = data.get('source')
+    if not isinstance(source, str) or not source.strip() or len(source) > 1_000_000:
+        raise ValueError('Choose a source with up to 1,000,000 characters.')
+    source = source.lstrip('\ufeff').strip()
+    rows, header = source.splitlines(), ''
+    if data.get('format') == 'json':
+        parsed = json.loads(source)
+        if isinstance(parsed, dict):
+            arrays = [name for name, value in parsed.items() if isinstance(value, list)]
+            if len(arrays) == 1:
+                entries = parsed.pop(arrays[0])
+                header = json.dumps(parsed, ensure_ascii=False) if parsed else ''
+                parsed = entries
+        rows = [json.dumps(item, ensure_ascii=False) for item in (parsed if isinstance(parsed, list) else [parsed])]
+    if data.get('format') == 'csv':
+        try:
+            dialect = csv.Sniffer().sniff(source[:8000], delimiters=',;\t|')
+            rows = [json.dumps(row, ensure_ascii=False) for row in csv.reader(io.StringIO(source), dialect, strict=True)]
+            if rows:
+                # Repeat the first row as context. It remains part of the first
+                # batch so headerless exports keep their first definition.
+                header = rows[0]
+        except csv.Error:
+            rows = source.splitlines()
+    batches, current, length = [], [], len(header)
+    for row in rows:
+        if len(row) + len(header) + 2 > 12_000:
+            raise ValueError('A source record is too long. Split it into smaller records and retry.')
+        if current and (len(current) == 40 or length + len(row) + 1 > 12_000):
+            batches.append('\n'.join(([header] if header else []) + current))
+            current, length = [], len(header)
+        current.append(row)
+        length += len(row) + 1
+    if current:
+        batches.append('\n'.join(([header] if header else []) + current))
+    return batches
+
+
+def read_definition_csv(text):
+    rows = csv.reader(io.StringIO(text, newline=''), strict=True)
+    try:
+        columns = [column.strip() for column in next(rows, [])]
+        missing = set(DEFINITION_COLUMNS) - set(columns)
+        if missing:
+            raise ValueError('CSV header is missing: ' + ', '.join(sorted(missing)) + '.')
+        if len(set(columns)) != len(columns):
+            raise ValueError('CSV header contains duplicate column names.')
+        definitions = []
+        for row in rows:
+            if not row:
+                continue
+            if len(row) != len(columns):
+                raise ValueError(f'CSV record ending on line {rows.line_num} has the wrong number of columns.')
+            if len(definitions) == MAX_DEFINITIONS:
+                raise ValueError(f'A file can contain up to {MAX_DEFINITIONS} definitions.')
+            definitions.append(dict(zip(columns, row)))
+    except csv.Error as exc:
+        raise ValueError(f'Invalid CSV near line {rows.line_num}: {exc}.') from exc
+    if not definitions:
+        raise ValueError('The CSV file contains no definitions.')
+    return {'definitions': definitions}
 
 
 VEHICLE_FIELDS = ('make', 'model', 'year', 'trim', 'drivetrain', 'engine', 'platform')
@@ -34,6 +106,7 @@ def vehicle_sort_key(vehicle):
 class Store:
     def __init__(self, path):
         self.directory = Path(path).resolve().parent
+        self.scan_linker = None
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(path, check_same_thread=False)
         self.lock = threading.RLock()
@@ -43,6 +116,9 @@ class Store:
             CREATE TABLE IF NOT EXISTS samples(id INTEGER PRIMARY KEY, scan_id TEXT, time TEXT, data TEXT);
             CREATE INDEX IF NOT EXISTS samples_scan ON samples(scan_id, id);
             CREATE TABLE IF NOT EXISTS definitions(id TEXT PRIMARY KEY, data TEXT);
+            CREATE INDEX IF NOT EXISTS definitions_code ON definitions(json_extract(data,'$.code'));
+            CREATE TABLE IF NOT EXISTS dtc_catalog(code TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(code, data));
+            CREATE TABLE IF NOT EXISTS dtc_catalog_version(digest TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS scans_vin_created ON scans(json_extract(data,'$.vin'),created);
             CREATE TABLE IF NOT EXISTS diagnostic_files(
                 scan_id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE, payload TEXT NOT NULL,
@@ -78,6 +154,9 @@ class Store:
             scan['diagnosticFile'] = f'diagnostics/{timestamp:%Y-%m-%d}/{identity}_{timestamp:%Y-%m-%dT%H-%M-%S.%fZ}_{scan["id"]}.json'
         with self.lock, self.db:
             self.db.execute('INSERT INTO scans VALUES(?,?,?)', (scan['id'], scan['createdAt'], json.dumps(scan)))
+            if self.scan_linker:
+                self.scan_linker(scan)
+                self.db.execute('UPDATE scans SET data=? WHERE id=?', (json.dumps(scan), scan['id']))
             if scan.get('diagnosticFile'):
                 self.db.execute('INSERT INTO diagnostic_files(scan_id,path,payload) VALUES(?,?,?)',
                                 (scan['id'], scan['diagnosticFile'], json.dumps(scan, ensure_ascii=False, indent=2) + '\n'))
@@ -243,43 +322,116 @@ class Store:
         with self.lock:
             return [json.loads(r[0]) for r in self.db.execute('SELECT data FROM definitions')]
 
-    def import_definitions(self, data):
-        if not isinstance(data, dict) or not isinstance(data.get('definitions'), list) or len(data['definitions']) > 5000:
+    def load_dtc_catalog(self):
+        generic = (DTC_DATA / 'dtc-generic.csv').read_bytes()
+        oem = (DTC_DATA / 'dtc-oem.csv').read_bytes()
+        digest = hashlib.sha256(generic + b'\0' + oem).hexdigest()
+        with self.lock, self.db:
+            if self.db.execute('SELECT digest FROM dtc_catalog_version').fetchone() == (digest,):
+                return
+            generic_rows = csv.DictReader(io.StringIO(generic.decode('utf-8'), newline=''))
+            records = [{**row, 'reference': 'OBDex community reference (CC0)',
+                        'sourceUrl': 'https://github.com/foerbsnavi/obdex', 'origin': 'Generic OBD-II'}
+                       for row in generic_rows]
+            for row in csv.DictReader(io.StringIO(oem.decode('utf-8'), newline='')):
+                row.update(yearFrom=int(row['yearFrom']), yearTo=int(row['yearTo']),
+                           origin='Manufacturer bulletin reference')
+                records.append(row)
+            self.db.execute('DELETE FROM dtc_catalog')
+            self.db.executemany('INSERT INTO dtc_catalog VALUES(?,?)',
+                                ((record['code'], json.dumps(record)) for record in records))
+            self.db.execute('DELETE FROM dtc_catalog_version')
+            self.db.execute('INSERT INTO dtc_catalog_version VALUES(?)', (digest,))
+
+    def definition_page(self, query='', page=0):
+        if not 0 <= page <= 100_000 or len(query) > 100:
+            raise ValueError('Invalid catalog search or page.')
+        size = 50
+        # The search treats percent signs and underscores as literal characters.
+        clauses = []
+        for word in query.split():
+            clauses.append((word.casefold(),) * 4)
+        where = ' AND '.join(
+            "(instr(lower(code),?) OR instr(lower(coalesce(json_extract(data,'$.make'),'')),?) "
+            "OR instr(lower(coalesce(json_extract(data,'$.model'),'')),?) "
+            "OR instr(lower(json_extract(data,'$.description')),?))" for _ in clauses)
+        catalog = ("FROM (SELECT code, data FROM dtc_catalog UNION ALL "
+                   "SELECT json_extract(data,'$.code') AS code, data FROM definitions)")
+        selection = catalog + (' WHERE ' + where if where else '')
+        args = tuple(word for clause in clauses for word in clause)
+        with self.lock:
+            total = self.db.execute('SELECT count(*) ' + selection, args).fetchone()[0]
+            rows = self.db.execute('SELECT data ' + selection + " ORDER BY json_extract(data,'$.make') IS NULL, code, data LIMIT ? OFFSET ?",
+                                   (*args, size, page * size)).fetchall()
+        return {'records': [json.loads(row[0]) for row in rows], 'total': total, 'pageSize': size}
+
+    @staticmethod
+    def validate_definitions(data, *, source_import=False):
+        if not isinstance(data, dict) or not isinstance(data.get('definitions'), list) or len(data['definitions']) > MAX_DEFINITIONS:
             raise ValueError('Expected an object with a definitions array (up to 5000 entries).')
         records = []
-        for item in data['definitions']:
+        for number, item in enumerate(data['definitions'], start=1):
             if not isinstance(item, dict):
-                raise ValueError('Every definition must be an object.')
-            required = ('make', 'model', 'ecu', 'code', 'description', 'sourceUrl', 'reference')
-            for key in required:
-                if not isinstance(item.get(key), str) or not item[key].strip() or len(item[key]) > 3000:
-                    raise ValueError(f'Every definition needs a nonempty {key}.')
-            if not re.match(r'^https?://[^\s]+$', item['sourceUrl']):
-                raise ValueError('Definition sourceUrl must be an HTTP(S) reference.')
-            start, end = int(item.get('yearFrom', 0)), int(item.get('yearTo', 0))
+                raise ValueError(f'Definition {number} must be an object.')
+            required = ('make', 'model', 'code', 'description') if source_import else DEFINITION_TEXT_FIELDS
+            record = {}
+            for key in DEFINITION_TEXT_FIELDS:
+                value = item.get(key, '')
+                if not isinstance(value, str) or len(value) > 3000 or (key in required and not value.strip()):
+                    raise ValueError(f'Definition {number} needs a valid {key} of up to 3000 characters.')
+                record[key] = value.strip()
+            if record['sourceUrl'] and not re.match(r'^https?://[^\s]+$', record['sourceUrl']):
+                raise ValueError(f'Definition {number} sourceUrl must be an HTTP(S) reference.')
+            if source_import and not re.fullmatch(r'[A-Za-z0-9_\- ]{2,32}', record['code']):
+                raise ValueError(f'Definition {number} needs a valid code identifier.')
+            try:
+                years = [str(item.get(field, '')).strip() for field in ('yearFrom', 'yearTo')]
+                if not all(re.fullmatch(r'[0-9]{4}', year) for year in years):
+                    raise ValueError()
+                start, end = map(int, years)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(f'Definition {number} needs whole-number years in yearFrom and yearTo.') from exc
             if not 1980 <= start <= end <= 2100:
-                raise ValueError('Supply a valid yearFrom/yearTo range.')
-            record = {key: item[key].strip() for key in required}
-            record.update(yearFrom=start, yearTo=end, origin='user-supplied; not independently verified')
+                raise ValueError(f'Definition {number} needs a valid yearFrom/yearTo range (1980–2100).')
+            origin = 'AI-assisted source import · unverified' if source_import else 'user-supplied; not independently verified'
+            record.update(yearFrom=start, yearTo=end, origin=origin)
             record['code'] = record['code'].upper()
             records.append(record)
+        return records
+
+    def import_definitions(self, data, *, source_import=False):
+        records = self.validate_definitions(data, source_import=source_import)
         with self.lock, self.db:
             for record in records:
                 key = '|'.join(str(record[k]).casefold() for k in ('make', 'model', 'yearFrom', 'yearTo', 'ecu', 'code'))
+                if source_import:
+                    key = 'source:' + hashlib.sha256(json.dumps(record, sort_keys=True).encode()).hexdigest()
                 self.db.execute('INSERT OR REPLACE INTO definitions VALUES(?,?)', (key, json.dumps(record)))
         return {'count': len(records)}
 
     def matches(self, scan):
         vehicle = scan.get('vehicle', {})
+        codes = {c['code'].upper() for c in scan['codes']}
+        if not codes:
+            return []
+        placeholders = ','.join('?' for _ in codes)
+        with self.lock:
+            imported = self.db.execute(f"SELECT data FROM definitions WHERE json_extract(data,'$.code') IN ({placeholders})",
+                                       tuple(codes)).fetchall()
+            catalog = self.db.execute(f'SELECT data FROM dtc_catalog WHERE code IN ({placeholders})', tuple(codes)).fetchall()
         result = []
-        for d in self.definitions():
+        for row in imported + catalog:
+            d = json.loads(row[0])
+            if d.get('origin') == 'Generic OBD-II':
+                result.append(d)
+                continue
             if (str(vehicle.get('make', '')).casefold() == d['make'].casefold()
                     and str(vehicle.get('model', '')).casefold() == d['model'].casefold()
                     and d['yearFrom'] <= int(vehicle.get('year') or 0) <= d['yearTo']):
-                for c in scan['codes']:
-                    if c['code'].casefold() == d['code'].casefold() and c.get('ecu', '').casefold() == d['ecu'].casefold():
-                        result.append(d)
-        return result
+                if not d.get('ecu') or any(c['code'].upper() == d['code'] and
+                                           (c.get('ecu') or '').casefold() == d['ecu'].casefold() for c in scan['codes']):
+                    result.append(d)
+        return sorted(result, key=lambda d: d.get('origin') == 'Generic OBD-II')
 
 
 def validate_scan(data):

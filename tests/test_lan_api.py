@@ -60,7 +60,8 @@ class LanApiTests(unittest.TestCase):
                            ('/api/fleet', None), ('/api/fleet/events', None), ('/api/fleet/settings', {'enabled': False}),
                            ('/api/bluetooth/pair', {'id': 'address'}),
                            ('/api/bluetooth/answer', {'promptId': 'fake', 'value': '1234'}),
-                           ('/api/connect', {}), ('/api/settings', {})]:
+                           ('/api/connect', {}), ('/api/settings', {}), ('/api/smtp', None),
+                           ('/api/smtp/test', {}), ('/api/notifications', None), ('/api/notifications', {})]:
             with self.subTest(path=path):
                 self.assertEqual(self.request(path, body)[0], 401)
 

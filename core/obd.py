@@ -142,14 +142,19 @@ def readings(raw, pid, protocol='6'):
     return result
 
 
-def vin(raw, protocol='6'):
+def vin(raw, protocol='6', *, require_consensus=False):
+    candidates = []
     for row in payloads(raw, protocol):
         b = row['data']
         if b[:2] == [0x49, 0x02] and len(b) >= 20:
             value = bytes(b[3:20]).decode('ascii', errors='replace')
             if re.fullmatch(r'[A-HJ-NPR-Z0-9]{17}', value):
-                return value
-    return None
+                if not require_consensus:
+                    return value
+                candidates.append(value)
+    if len(set(candidates)) > 1:
+        raise ValueError('ECUs reported conflicting VINs. Check the vehicle and verify again before assignment.')
+    return candidates[0] if candidates else None
 
 
 def monitor(raw, protocol='6'):
