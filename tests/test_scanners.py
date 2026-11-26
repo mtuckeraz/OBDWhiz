@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from core.adapter import Adapter
 from core.dossiers import Dossiers
@@ -141,6 +141,20 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
         reopened = ScannerRegistry(self.store, self.dossiers, self.fleet)
         self.assertEqual(reopened.job(running['id'])['status'], 'failed')
         self.assertEqual(reopened.next_job()['id'], queued['id'])
+
+    def test_backfill_loads_each_scanner_once_and_links_all_legacy_scans(self):
+        records = [self.store.save_scan({'vehicle': {}, 'codes': [], 'vin': F450,
+                                         'reader': {'address': address}})
+                   for address in [ADDRESS, ADDRESS.lower(), ADDRESS]]
+        with self.store.lock, self.store.db, \
+                patch.object(self.registry, 'register', wraps=self.registry.register) as register:
+            self.registry.backfill()
+        self.assertEqual(register.call_count, 1)
+        for record in records:
+            restored = self.store.get(record['id'])
+            self.assertEqual(restored['scannerId'], self.scanner['id'])
+            self.assertEqual(restored['scannerIdentifier'], self.scanner['identifier'])
+            self.assertEqual(restored['vehicleId'], self.ford['id'])
 
     def test_comparison_only_calls_a_missing_code_absent_for_a_responding_ecu(self):
         first = {'code':'P0300', 'status':'stored', 'ecu':'7E8'}

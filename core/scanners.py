@@ -76,9 +76,12 @@ class ScannerRegistry:
                 WHERE status='running'""", (now(), json.dumps({'message': 'Interrupted by restart. Request a fresh scan.'})))
 
     def backfill(self):
+        scanners_by_address = {}
         for reader in self.fleet.readers():
             scanner = self.register({'transport': 'ble', 'address': reader['address'],
                                      'name': reader['name'], 'controller': reader['controller']}, commit=False)
+            if scanner.get('name'):
+                scanners_by_address[scanner['address']] = scanner
             target = self.db.execute('SELECT id FROM dossiers WHERE vin=?', (reader.get('vin'),)).fetchone()
             if target and not self.current(vehicle_id=target[0]):
                 self.assign(scanner['id'], target[0], 'legacy_fleet', None, 'migration', reader['createdAt'])
@@ -91,8 +94,12 @@ class ScannerRegistry:
             address = scan['reader']['address']
             if not isinstance(address, str) or not re.fullmatch(r'(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}', address):
                 continue
-            scanner = self.register({'transport': 'ble', 'address': address,
-                                     'name': str(scan['reader'].get('label') or address)[:120]}, commit=False)
+            address = address.upper()
+            scanner = scanners_by_address.get(address)
+            if scanner is None:
+                scanner = self.register({'transport': 'ble', 'address': address,
+                                         'name': str(scan['reader'].get('label') or address)[:120]}, commit=False)
+                scanners_by_address[address] = scanner
             self.db.execute('INSERT OR IGNORE INTO scanner_scans VALUES(?,?)', (scan_id, scanner['id']))
             scan['scannerId'] = scanner['id']
             dossier = self.db.execute('SELECT vehicle_id FROM dossier_scans WHERE scan_id=?', (scan_id,)).fetchone()
