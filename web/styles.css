@@ -8,6 +8,14 @@
 .login-screen{position:fixed;inset:0;z-index:100;display:grid;place-items:center;padding:24px;background:#101413}.login-panel{width:min(100%,460px)}.signed-out>.sidebar,.signed-out>.main-wrap{display:none}.receiver-actions{display:flex;flex-direction:column;gap:8px;flex:none}.device>div:first-child{min-width:0}.device details{margin-top:8px}.device details p{font-family:monospace;overflow-wrap:anywhere}#pairing-panel form{margin:0}#pairing-status{overflow-wrap:anywhere}#bluetooth-status{align-self:center}
 .fleet-readers{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:16px;margin-top:24px}.fleet-reader{padding:18px;border:1px solid var(--line);border-radius:10px;background:#111713;min-width:0}.fleet-reader p,.fleet-reader strong{overflow-wrap:anywhere}.fleet-reader .actions{flex-wrap:wrap}.fleet-event{padding:15px 0;border-bottom:1px solid var(--line)}.fleet-event>strong,.fleet-event>span{display:block}.fleet-event>a{display:block;font-size:.8rem;margin-top:7px}
 .dossier-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 12px; }
+.dossier-profile-notes { white-space: pre-wrap; overflow-wrap: anywhere; }
+.scanner-list { display: grid; gap: 10px; }
+.scanner-card { margin: 0; border: 1px solid var(--line); border-radius: 10px; background: #111713; overflow-wrap: anywhere; }
+.scanner-card > summary { padding: 14px 16px; color: var(--text); }
+.scanner-card > summary::marker { color: var(--lime); }
+.scanner-card > summary span { margin-left: 8px; color: var(--muted); }
+.scanner-profile { padding: 18px 16px; border-top: 1px solid var(--line); }
+.button.danger, .text-button.danger { color: var(--red); }
 .dossier-result, .dossier-media { padding: 14px; border: 1px solid var(--line); border-radius: 10px; overflow-wrap: anywhere; }
 .dossier-result { text-align: left; background: #111713; color: inherit; cursor: pointer; }
 .dossier-result span, .dossier-media strong { display: block; }

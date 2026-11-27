@@ -1,7 +1,12 @@
+from contextlib import closing
 from pathlib import Path
+from shutil import copyfile
+import sqlite3
 import tempfile
 import unittest
-from core.store import Store, definition_source_batches, normalize_vin, validate_scan
+from unittest.mock import patch
+from core.store import (DATABASE_FILENAME, LEGACY_DATABASE_FILENAME, Store, app_database, data_directory,
+                        definition_source_batches, normalize_vin, validate_scan)
 
 
 class StoreTests(unittest.TestCase):
@@ -20,6 +25,49 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(restored['codes'][0]['code'], 'A1B2C3')
         self.assertIsNone(restored['codes'][0]['definition'])
         self.assertEqual(restored['trace'], [{'response': 'raw bytes'}])
+
+    def test_database_rename_preserves_committed_wal_pages(self):
+        directory = Path(self.temp.name)
+        source = directory / 'source.sqlite3'
+        legacy = directory / LEGACY_DATABASE_FILENAME
+        with closing(sqlite3.connect(source)) as db:
+            db.execute('PRAGMA journal_mode=WAL')
+            db.execute('CREATE TABLE existing(data TEXT)')
+            db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+            with db:
+                db.execute("INSERT INTO existing VALUES('historical scan')")
+            copyfile(source, legacy)
+            copyfile(str(source) + '-wal', str(legacy) + '-wal')
+            current = app_database(directory)
+            self.assertEqual(current, directory / DATABASE_FILENAME)
+            self.assertFalse(legacy.exists())
+            with closing(sqlite3.connect(current)) as migrated:
+                self.assertEqual(migrated.execute('SELECT data FROM existing').fetchone(), ('historical scan',))
+            self.assertEqual(app_database(directory), current)
+
+    def test_usb_data_directory_requires_mount_and_preserves_existing_default(self):
+        root = Path(self.temp.name).resolve()
+        local = root / '.local'
+        mount = root / 'usb'
+        settings = {'OBDWHIZ_DATA_MOUNT': str(mount)}
+        self.assertEqual(data_directory(root, {}), local)
+        mount.mkdir()
+        with self.assertRaisesRegex(ValueError, 'not mounted'):
+            data_directory(root, settings)
+        self.assertFalse((mount / 'proactive').exists())
+
+        with patch.object(type(mount), 'is_mount', return_value=True):
+            self.assertEqual(data_directory(root, settings), mount / 'proactive')
+            with self.assertRaisesRegex(ValueError, 'must be on'):
+                data_directory(root, {**settings, 'OBDWHIZ_DATA_DIR': str(local)})
+            local.mkdir()
+            (local / LEGACY_DATABASE_FILENAME).touch()
+            with self.assertRaisesRegex(ValueError, 'Copy the existing ProActive data'):
+                data_directory(root, settings)
+            target = mount / 'proactive'
+            target.mkdir()
+            (target / DATABASE_FILENAME).touch()
+            self.assertEqual(data_directory(root, settings), target)
 
     def test_definitions_require_exact_vehicle_ecu_and_year(self):
         record = {'make': 'BMW', 'model': '750e', 'yearFrom': 2025, 'yearTo': 2026, 'ecu': 'DME', 'code': '123456',

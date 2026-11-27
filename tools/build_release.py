@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 FILES = ('VERSION', 'README.md', 'requirements.txt', '.env.example',
          'IMPLEMENTATION_PLAN.md', 'FEATURE_MATRIX.md', 'DATABASE_SCHEMA.md', 'HARDWARE_COMPATIBILITY.md',
          'BLE_PROTOCOL.md', 'API.md', 'DEPLOYMENT.md', 'TESTING.md', 'CHANGELOG.md',
-         'server.py', 'install-pi.sh', 'Start-OBDWhiz.sh', 'Start-Apex.cmd', 'Start-Apex.ps1')
+         'server.py', 'install-pi.sh', 'Start-OBDWhiz.sh', 'Start-ProActive.cmd', 'Start-ProActive.ps1')
 DIRECTORIES = {'core': {'.py'}, 'web': {'.html', '.css', '.js', '.svg'},
                'tools': {'.py'}, 'tests': {'.py'}, 'data': {'.csv'}}
 

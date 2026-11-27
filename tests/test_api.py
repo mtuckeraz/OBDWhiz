@@ -6,6 +6,7 @@ import tempfile
 import threading
 import unittest
 from unittest.mock import patch
+from core.store import Store
 from server import create_app
 
 
@@ -13,7 +14,13 @@ class ApiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory()
-        handler, cls.adapter, cls.run_async, cls.loop, cls.store = create_app(Path(cls.temp.name) / 'api.sqlite3')
+        path = Path(cls.temp.name) / 'api.sqlite3'
+        legacy = Store(path)
+        cls.old_demo = legacy.save_scan({'vehicle': {'make': 'BMW', 'model': 'Demonstration vehicle'}, 'codes': [],
+                                         'source': 'Built-in demonstration', 'demo': True})
+        cls.real_bmw = legacy.save_scan({'vehicle': {'make': 'BMW', 'model': '330i'}, 'codes': []})
+        legacy.db.close()
+        handler, cls.adapter, cls.run_async, cls.loop, cls.store = create_app(path)
         cls.httpd = ThreadingHTTPServer(('127.0.0.1', 0), handler)
         cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
         cls.thread.start()
@@ -44,14 +51,14 @@ class ApiTests(unittest.TestCase):
         status, headers, body = self.request('/')
         self.assertEqual(status, 200)
         self.assertIn(b'Diagnostic workbench', body)
-        self.assertIn(b'OBDWhiz', body)
+        self.assertIn(b'ProActive', body)
         self.assertIn(b'Raspberry Pi', body)
         self.assertIn('frame-ancestors', dict(headers)['Content-Security-Policy'])
 
     def test_dns_rebinding_and_cross_origin_blocked(self):
         self.assertEqual(self.request('/api/status', headers={'Host': 'attacker.example'})[0], 403)
-        self.assertEqual(self.request('/api/demo', {}, {'Origin': 'https://attacker.example'})[0], 403)
-        self.assertEqual(self.request('/api/demo', {}, {'X-Apex-Client': ''})[0], 403)
+        self.assertEqual(self.request('/api/settings', {}, {'Origin': 'https://attacker.example'})[0], 403)
+        self.assertEqual(self.request('/api/settings', {}, {'X-Apex-Client': ''})[0], 403)
         self.assertEqual(self.request('/api/status', headers={'Sec-Fetch-Site': 'cross-site'})[0], 403)
 
     def test_no_credential_echo_and_no_mutation_get_route(self):
@@ -76,10 +83,16 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(export['samples'], [])
 
     def test_demo_excluded_from_paid_research(self):
-        scan = json.loads(self.request('/api/demo', {})[2])
+        scan = self.store.save_scan({'vehicle': {}, 'codes': [], 'demo': True})
         status, _, body = self.request('/api/scans/' + scan['id'] + '/research', {})
         self.assertEqual(status, 400)
         self.assertIn(b'Demo', body)
+
+    def test_builtin_demo_is_removed_and_real_bmw_is_retained(self):
+        self.assertNotIn(b'Explore a demo scan', self.request('/')[2])
+        self.assertEqual(self.request('/api/demo', {})[0], 404)
+        self.assertEqual(self.request('/api/scans/' + self.old_demo['id'])[0], 404)
+        self.assertEqual(self.request('/api/scans/' + self.real_bmw['id'])[0], 200)
 
     def test_definition_uploads_accept_json_and_csv(self):
         record = {'make': 'BMW', 'model': '750e', 'yearFrom': 2025, 'yearTo': 2026, 'ecu': 'DME',
@@ -162,6 +175,17 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn('attachment;', dict(headers)['Content-Disposition'])
         self.assertEqual(json.loads(payload)['id'], scan['id'])
+
+    def test_scan_summary_download_is_a_dated_pdf(self):
+        scan = json.loads(self.request('/api/import', {'vehicle': {'make': 'Ford'},
+            'codes': [{'code': 'P0300', 'ecu': '7E8', 'status': 'stored'}]})[2])
+        status, headers, payload = self.request('/api/scans/' + scan['id'] + '/summary.pdf')
+        headers = dict(headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(headers['Content-Type'], 'application/pdf')
+        self.assertIn('proactive-diagnostic-' + scan['createdAt'][:10], headers['Content-Disposition'])
+        self.assertTrue(payload.startswith(b'%PDF-'))
+        self.assertTrue(payload.rstrip().endswith(b'%%EOF'))
 
     def test_fleet_api_settings_and_event_cursor_validation(self):
         status, _, body = self.request('/api/fleet')

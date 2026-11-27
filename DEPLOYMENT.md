@@ -2,7 +2,13 @@
 
 Use the existing Pi installer or Windows launcher. Install requirements after updating the checkout. On Windows, use `python server.py --lan` from the project virtual environment for authenticated LAN access. On a new database, sign in as `admin` or `user` with password `123456`. Set a new password for both accounts before sharing the server address. The administrator can add named accounts under Vehicle Scans.
 
-Set `OBDWHIZ_DATA_DIR` and `OBDWHIZ_MEDIA_DIR` in the project .env file to move data or use an SSD. Defaults are .local and its media subdirectory. Give the app account read and write access. Mount the SSD at its configured path before starting the app. Copy the complete data directory while the service is stopped when moving an existing database.
+## USB storage on Raspberry Pi
+
+Mount a USB SSD to a fixed path such as `/mnt/proactive-data`. Use its filesystem UUID in `/etc/fstab` so the same drive is mounted after a reboot. An ext4 filesystem works with the Pi's Linux file permissions. Give the account that runs ProActive write access to its data directory.
+
+Sign in as an administrator and open **Setup → Storage**. Select the drive, then choose **Move storage and restart**. ProActive copies the database, diagnostic files, and media into a new directory on the selected drive and keeps the previous copy. The dialog shows the active paths after you sign back in. Reinstall the generated unit with `bash install-pi.sh --service` if an older unit was explicitly tied to a different drive.
+
+For a fresh setup using configuration files, set `OBDWHIZ_DATA_MOUNT=/mnt/proactive-data` in `.env`. That makes `/mnt/proactive-data/proactive` the default unless `OBDWHIZ_DATA_DIR` specifies another directory on the drive. The browser selection takes precedence after a migration. ProActive checks that the selected filesystem is mounted before opening the database. Keep a backup on a separate device.
 
 Upgrades keep existing usernames and passwords. Administrator permissions are retained. Former Manager and Technician accounts become User accounts. If an existing User already owns the username `admin` and there is no Administrator, the migration creates a separate administrator under `obdwhiz-admin` (or an unused `obdwhiz-*` name if that is taken).
 

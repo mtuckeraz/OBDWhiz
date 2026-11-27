@@ -61,7 +61,8 @@ class LanApiTests(unittest.TestCase):
                            ('/api/bluetooth/pair', {'id': 'address'}),
                            ('/api/bluetooth/answer', {'promptId': 'fake', 'value': '1234'}),
                            ('/api/connect', {}), ('/api/settings', {}), ('/api/smtp', None),
-                           ('/api/smtp/test', {}), ('/api/notifications', None), ('/api/notifications', {})]:
+                           ('/api/smtp/test', {}), ('/api/notifications', None), ('/api/notifications', {}),
+                           ('/api/special-functions', None), ('/api/special-functions', {})]:
             with self.subTest(path=path):
                 self.assertEqual(self.request(path, body)[0], 401)
 
@@ -83,7 +84,7 @@ class LanApiTests(unittest.TestCase):
         self.assertEqual(self.request('/api/status', cookie=cookie, headers={'Host': host})[0], 200)
         self.assertEqual(self.request('/api/status', cookie=cookie, headers={'Host': 'attacker.example'})[0], 403)
         self.assertEqual(self.request('/api/login', {'key': self.key}, headers={'Origin': 'https://attacker.example'})[0], 403)
-        self.assertEqual(self.request('/api/demo', {}, cookie, {'X-Apex-Client': ''})[0], 403)
+        self.assertEqual(self.request('/api/settings', {}, cookie, {'X-Apex-Client': ''})[0], 403)
 
     def test_authenticated_pairing_and_answers_reach_the_pi_bluetooth_manager(self):
         cookie = self.login()

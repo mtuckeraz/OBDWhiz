@@ -1,4 +1,4 @@
-"""OBDWhiz Pi workbench with optional authenticated local-network access."""
+"""ProActive diagnostic workbench with optional authenticated local-network access."""
 import argparse
 import asyncio
 import concurrent.futures
@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 import webbrowser
 
 ROOT = Path(__file__).resolve().parent
-INSTALL_HINT = 'Run bash install-pi.sh on the Pi.' if sys.platform == 'linux' else 'Run Start-Apex.ps1 on Windows.'
+INSTALL_HINT = 'Run bash install-pi.sh on the Pi.' if sys.platform == 'linux' else 'Run Start-ProActive.ps1 on Windows.'
 for line in (ROOT / '.env').read_text(encoding='utf-8').splitlines() if (ROOT / '.env').exists() else []:
     if '=' in line and not line.lstrip().startswith('#'):
         key, value = line.split('=', 1)
@@ -29,32 +29,23 @@ from core import obd
 from core.adapter import Adapter
 from core.access import BrowserAccess
 from core.bluetooth import ADAPTER, DEVICE, Bluetooth
+from core.deletions import Deletions
 from core.fleet import Fleet
 from core.dossiers import Dossiers, now
 from core.media import CATEGORIES, MAX_BYTES, Media
 from core.notifications import Notifications
 from core.scan_worker import ScanWorker
-from core.scanners import ScannerRegistry
+from core.scanners import SPECIAL_FUNCTIONS, ScannerRegistry
 from core.research import Research
-from core.store import VEHICLE_FIELDS, Store, definition_source_batches, read_definition_csv
+from core.scan_pdf import summary_pdf
+from core.store import VEHICLE_FIELDS, Store, app_database, data_directory, definition_source_batches, read_definition_csv
+from core.storage import Storage
 
 
-def demo():
-    return {'vehicle': {'make': 'BMW', 'model': 'Demonstration vehicle', 'year': 2025, 'engine': 'Illustrative data', 'symptoms': 'Demo only'},
-            'demo': True, 'source': 'Built-in demonstration', 'protocol': '6',
-            'scope': 'Simulated standard OBD-II scan. No vehicle connected.',
-            'codes': [{'code': 'P0300', 'ecu': '7E8', 'status': 'stored', 'definition': 'Illustrative random/multiple cylinder misfire code'},
-                      {'code': 'P0171', 'ecu': '7E8', 'status': 'pending', 'definition': 'Illustrative lean mixture code'}],
-            'readings': [{'pid': '0C', 'ecu': '7E8', 'label': 'Engine speed', 'unit': 'rpm', 'value': 812},
-                         {'pid': '05', 'ecu': '7E8', 'label': 'Coolant temperature', 'unit': '°C', 'value': 86},
-                         {'pid': '42', 'ecu': '7E8', 'label': 'Control module voltage', 'unit': 'V', 'value': 13.8}],
-            'warnings': ['Demonstration data; no diagnosis has been performed.'], 'trace': [],
-            'research': {'status': 'demo', 'text': 'This is a sample workspace. Connect the adapter and scan a real vehicle to research its codes. A code describes a detected condition; it does not establish which component caused it.'}}
-
-
-def create_app(data_path=None, *, lan=False, authenticated=False, access_key=None, media_path=None, tls=False, public_host=None):
+def create_app(data_path=None, *, lan=False, authenticated=False, access_key=None, media_path=None, tls=False,
+               public_host=None, storage=None):
     hostname = socket.gethostname().lower()
-    data_path = Path(data_path) if data_path else ROOT / '.local' / 'apex.sqlite3'
+    data_path = Path(data_path) if data_path else app_database(ROOT / '.local')
     bluetooth = Bluetooth(data_path.parent / 'receiver.json')
     store = Store(data_path)
     store.load_dtc_catalog()
@@ -79,6 +70,8 @@ def create_app(data_path=None, *, lan=False, authenticated=False, access_key=Non
     fleet = Fleet(store, bluetooth, adapter)
     adapter.fleet = fleet
     scanners = ScannerRegistry(store, dossiers, fleet.data)
+    deletions = Deletions(store, dossiers, scanners, media.root)
+    deletions.remove_builtin_demos()
     worker = ScanWorker(scanners, adapter, fleet, bluetooth)
     adapter.scan_worker = worker
     adapter.notifications = notifications
@@ -173,6 +166,21 @@ def create_app(data_path=None, *, lan=False, authenticated=False, access_key=Non
     async def configure_fleet(changes):
         return fleet.configure(changes)
 
+    async def configure_polling(changes):
+        async with fleet.link_lock:
+            return await adapter.polling(changes)
+
+    async def delete_record(kind, record_id, actor):
+        async with fleet.link_lock:
+            if kind == 'dossiers':
+                return await asyncio.to_thread(deletions.vehicle, record_id, actor)
+            if adapter.state['scanId'] == record_id and adapter.state['polling']:
+                raise ValueError('Stop live polling before deleting this scan.')
+            result = await asyncio.to_thread(deletions.scan, record_id, actor)
+            if adapter.state['scanId'] == record_id:
+                adapter.state.update(scanId=None, latest=[], lastSampleAt=None)
+            return result
+
     async def pair_reader(address):
         async with fleet.link_lock:
             return await bluetooth.start_pair(address)
@@ -197,13 +205,18 @@ def create_app(data_path=None, *, lan=False, authenticated=False, access_key=Non
         return result
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = 'OBDWhiz/0.6'
+        server_version = 'ProActive/0.6'
         timeout = 60
 
         def log_message(self, fmt, *args):
             # Avoid logging imported data or provider keys.
             if args and str(args[0]).startswith(('POST', 'GET')):
                 return
+
+        def setup(self):
+            if storage:
+                self.request.settimeout(60)
+            super().setup()
 
         def allowed(self, write=False):
             expected = {f'localhost:{self.server.server_port}', f'127.0.0.1:{self.server.server_port}'}
@@ -215,28 +228,32 @@ def create_app(data_path=None, *, lan=False, authenticated=False, access_key=Non
                 expected.add(public_host.lower())
             host = self.headers.get('Host', '').lower()
             if host not in expected:
-                self.json({'error': 'Use this Pi hostname or IP address to open OBDWhiz.'}, 403)
+                self.json({'error': 'Use the server hostname or IP address to open ProActive.'}, 403)
                 return False
             origin = self.headers.get('Origin')
             if origin and origin != f'{"https" if tls else "http"}://{host}':
                 self.json({'error': 'Cross-origin access is blocked.'}, 403)
                 return False
             if self.headers.get('Sec-Fetch-Site') == 'cross-site' or (write and self.headers.get('X-Apex-Client') != '1'):
-                self.json({'error': 'Use the OBDWhiz web interface.'}, 403)
+                self.json({'error': 'Use the ProActive web interface.'}, 403)
                 return False
             path = urlparse(self.path).path
             self.user = access.identity(self.headers.get('Cookie')) if access else None
-            repository = path.startswith(('/api/dossiers', '/api/media/', '/api/staff', '/api/adapters', '/api/scan-jobs'))
+            repository = path in ('/api/storage', '/api/special-functions') or path.startswith(
+                ('/api/dossiers', '/api/media/', '/api/staff', '/api/adapters', '/api/scan-jobs'))
             requires_login = repository or (access and path.startswith('/api/') and path not in ('/api/login', '/api/session'))
             if requires_login and not self.user:
-                self.json({'error': 'Sign in to OBDWhiz.', 'authenticationRequired': True}, 401)
+                self.json({'error': 'Sign in to ProActive.', 'authenticationRequired': True}, 401)
                 return False
             if self.user and self.user.get('mustChangePassword') and path.startswith('/api/') and path not in (
                     '/api/session', '/api/logout', '/api/password'):
                 self.json({'error': 'Change your initial password to continue.', 'passwordChangeRequired': True}, 403)
                 return False
+            if write and getattr(self.server, 'storage_restart', False):
+                self.json({'error': 'ProActive is restarting to finish a storage move.'}, 503)
+                return False
             if self.user and self.user['role'] != 'admin' and (
-                    path.startswith(('/api/staff', '/api/notifications', '/api/smtp')) or
+                    path == '/api/storage' or path.startswith(('/api/staff', '/api/notifications', '/api/smtp')) or
                     (write and path in ('/api/settings', '/api/dossiers/policy'))):
                 self.json({'error': 'An administrator account is required.'}, 403)
                 return False
@@ -277,6 +294,10 @@ def create_app(data_path=None, *, lan=False, authenticated=False, access_key=Non
             try:
                 if path == '/api/session':
                     return self.json({'required': bool(access), 'authenticated': not access or bool(self.user), 'user': self.user})
+                if path == '/api/storage':
+                    return self.json(storage.overview() if storage else {'available': False})
+                if path == '/api/special-functions':
+                    return self.json(SPECIAL_FUNCTIONS)
                 if path == '/api/notifications':
                     return self.json(notifications.overview())
                 if path == '/api/smtp':
@@ -358,13 +379,21 @@ def create_app(data_path=None, *, lan=False, authenticated=False, access_key=Non
                     return self.json(store.definition_page(query.get('q', [''])[0], int(query.get('page', ['0'])[0])))
                 if path == '/api/adapter/trace':
                     return self.json({'adapter': dict(adapter.state), 'trace': list(adapter.trace)})
-                match = re.fullmatch(r'/api/scans/([0-9a-f-]+)(/samples|/export|/diagnostic)?', path)
+                match = re.fullmatch(r'/api/scans/([0-9a-f-]+)(/samples|/export|/diagnostic|/summary\.pdf)?', path)
                 if match:
                     scan = store.get(match[1])
                     if match[2] == '/diagnostic':
                         file = store.diagnostic_file(match[1])
                         payload = file.read_bytes()
                         self.send_headers(200, 'application/json; charset=utf-8', len(payload), filename=file.name)
+                        return self.wfile.write(payload)
+                    if match[2] == '/summary.pdf':
+                        try:
+                            payload = summary_pdf(scan, store.matches(scan))
+                        except ModuleNotFoundError:
+                            return self.json({'error': f'PDF dependencies are missing. {INSTALL_HINT}'}, 503)
+                        filename = f"proactive-diagnostic-{scan['createdAt'][:10]}-{scan['id'][:8]}.pdf"
+                        self.send_headers(200, 'application/pdf', len(payload), filename=filename)
                         return self.wfile.write(payload)
                     if match[2] == '/samples':
                         return self.json(store.samples(match[1]))
@@ -373,6 +402,7 @@ def create_app(data_path=None, *, lan=False, authenticated=False, access_key=Non
                     scan['definitionMatches'] = store.matches(scan)
                     return self.json(scan)
                 files = {'/': 'index.html', '/app.js': 'app.js', '/dossiers.js': 'dossiers.js',
+                         '/special-functions.js': 'special-functions.js',
                          '/scanners.js': 'scanners.js',
                          '/styles.css': 'styles.css', '/logo.svg': 'logo.svg'}
                 if path in files:
@@ -388,6 +418,24 @@ def create_app(data_path=None, *, lan=False, authenticated=False, access_key=Non
                 self.json({'error': str(exc)}, 400)
             except Exception as exc:
                 self.json({'error': str(exc)}, 500)
+
+        def do_DELETE(self):
+            if not self.allowed(write=True):
+                return
+            if not self.user or self.user['role'] != 'admin':
+                return self.json({'error': 'An administrator account is required.'}, 403)
+            path = urlparse(self.path).path
+            match = re.fullmatch(r'/api/(dossiers|scans)/([0-9a-f-]{36})', path)
+            if not match:
+                return self.json({'error': 'Not found.'}, 404)
+            try:
+                return self.json(run(delete_record(match[1], match[2], self.user['id'])))
+            except LookupError as exc:
+                return self.json({'error': str(exc)}, 404)
+            except ValueError as exc:
+                return self.json({'error': str(exc)}, 400)
+            except Exception:
+                return self.json({'error': 'Could not delete this record.'}, 500)
 
         def do_POST(self):
             if not self.allowed(write=True):
@@ -418,6 +466,23 @@ def create_app(data_path=None, *, lan=False, authenticated=False, access_key=Non
                 body = json.loads(payload or b'{}')
                 if not isinstance(body, dict):
                     raise ValueError('Expected a JSON object.')
+                if path == '/api/special-functions':
+                    kind = body.get('function')
+                    if not isinstance(kind, str) or kind not in SPECIAL_FUNCTIONS:
+                        raise ValueError('Choose a listed special function.')
+                    job = scanners.enqueue(body.get('scannerId'), body.get('vehicleId'), self.user['id'],
+                                           kind, tire_size=body.get('tireSize'))
+                    run(worker.notify())
+                    return self.json(job, 202)
+                if path == '/api/storage':
+                    if not storage:
+                        return self.json({'error': 'Storage selection is available on the Pi.'}, 404)
+                    storage.request(body.get('drive'))
+                    self.server.storage_restart = True
+                    try:
+                        return self.json({'pending': True}, 202)
+                    finally:
+                        threading.Thread(target=self.server.shutdown, daemon=True).start()
                 if path == '/api/definitions/extract':
                     return self.json(research.extract_definitions(body))
                 if path == '/api/definitions/prepare':
@@ -471,6 +536,8 @@ def create_app(data_path=None, *, lan=False, authenticated=False, access_key=Non
                         return self.json({'error': 'Administrator access required to release scanners.'}, 403)
                     return self.json(run(release_scanner(match[1], self.user['id'])))
                 if path == '/api/scan-jobs':
+                    if body.get('type', 'scan') not in ('verify', 'scan'):
+                        raise ValueError('Choose VIN verification or a diagnostic scan.')
                     job = scanners.enqueue(body.get('scannerId'), body.get('vehicleId'), self.user['id'],
                                            body.get('type', 'scan'))
                     run(worker.notify())
@@ -527,7 +594,7 @@ def create_app(data_path=None, *, lan=False, authenticated=False, access_key=Non
                 if path == '/api/disconnect':
                     return self.json(run(manual_disconnect()))
                 if path == '/api/poll':
-                    return self.json(run(adapter.polling(body)))
+                    return self.json(run(configure_polling(body)))
                 if path == '/api/scan':
                     return self.json(auto(run(manual_scan(body.get('vehicle', {})))))
                 if path == '/api/import':
@@ -537,8 +604,6 @@ def create_app(data_path=None, *, lan=False, authenticated=False, access_key=Non
                         body.pop(field, None)
                     body.setdefault('scope', 'Imported data; module coverage depends on the source tool.')
                     return self.json(auto(store.save_scan(body)))
-                if path == '/api/demo':
-                    return self.json(store.save_scan(demo()))
                 vehicle_match = re.fullmatch(r'/api/vehicles/([A-HJ-NPR-Z0-9]{17})', path)
                 if vehicle_match:
                     vehicle = store.update_vehicle(vehicle_match[1], body.get('vehicle', {}))
@@ -581,7 +646,15 @@ def main():
     parser.add_argument('--open', action='store_true')
     parser.add_argument('--lan', action='store_true', help='Allow signed-in browsers on the local network')
     args = parser.parse_args()
-    data = Path(os.environ.get('OBDWHIZ_DATA_DIR') or ROOT / '.local').resolve()
+    storage = Storage(ROOT, os.environ) if sys.platform == 'linux' else None
+    try:
+        if storage:
+            data, media_path = storage.prepare()
+        else:
+            data = data_directory(ROOT, os.environ)
+            media_path = os.environ.get('OBDWHIZ_MEDIA_DIR')
+    except ValueError as exc:
+        sys.exit(str(exc))
     cert = os.environ.get('OBDWHIZ_TLS_CERT')
     private_key = os.environ.get('OBDWHIZ_TLS_KEY')
     if bool(cert) != bool(private_key):
@@ -589,18 +662,21 @@ def main():
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER) if cert else None
     if context:
         context.load_cert_chain(cert, private_key)
-    handler, adapter, run, loop, store = create_app(data / 'apex.sqlite3', lan=args.lan, authenticated=True,
-        media_path=os.environ.get('OBDWHIZ_MEDIA_DIR'), tls=bool(context), public_host=os.environ.get('OBDWHIZ_PUBLIC_HOST'))
+    handler, adapter, run, loop, store = create_app(app_database(data), lan=args.lan, authenticated=True,
+        media_path=media_path, tls=bool(context), public_host=os.environ.get('OBDWHIZ_PUBLIC_HOST'), storage=storage)
     try:
         httpd = ThreadingHTTPServer(('0.0.0.0' if args.lan else '127.0.0.1', args.port), handler)
     except OSError as exc:
-        sys.exit(f'Cannot start OBDWhiz: {exc}. Use --port to select an unused port.')
+        sys.exit(f'Cannot start ProActive: {exc}. Use --port to select an unused port.')
     if context:
         httpd.socket = context.wrap_socket(httpd.socket, server_side=True, do_handshake_on_connect=False)
+    if storage:
+        httpd.daemon_threads = False
     run(adapter.fleet.start())
     run(adapter.scan_worker.start())
-    threading.Thread(target=adapter.notifications.run, daemon=True, name='obdwhiz-notifications').start()
-    print(f'OBDWhiz ready on port {args.port} ({"LAN" if args.lan else "localhost"}; account sign-in required)', flush=True)
+    mail_worker = threading.Thread(target=adapter.notifications.run, daemon=True, name='obdwhiz-notifications')
+    mail_worker.start()
+    print(f'ProActive ready on port {args.port} ({"LAN" if args.lan else "localhost"}; account sign-in required)', flush=True)
     if args.open:
         webbrowser.open(f'{"https" if context else "http"}://localhost:{args.port}')
     try:
@@ -609,12 +685,15 @@ def main():
         pass
     finally:
         adapter.notifications.stopped.set()
+        httpd.server_close()
         run(adapter.scan_worker.close())
         run(adapter.fleet.close())
         run(adapter.bluetooth.close())
         run(adapter.disconnect())
-        httpd.server_close()
         loop.call_soon_threadsafe(loop.stop)
+    if getattr(httpd, 'storage_restart', False):
+        mail_worker.join(timeout=35)
+        os.execv(sys.executable, [sys.executable, *sys.argv])
 
 
 if __name__ == '__main__':

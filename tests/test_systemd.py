@@ -38,6 +38,7 @@ class SystemdTests(unittest.TestCase):
 
             correct = verify(content)
             self.assertEqual(correct.returncode, 0, correct.stdout + correct.stderr)
+            self.assertIn('After=bluetooth.service network.target local-fs.target', content)
             # Reproduce the original defect, ensuring this check catches it.
             broken = content.replace(f'WorkingDirectory={str(app).replace("%", "%%")}\n',
                                      f'WorkingDirectory="{str(app).replace("%", "%%")}"\n')

@@ -27,8 +27,8 @@ def render(directory, user, group):
             raise ValueError('Unsupported system user/group name.')
     root = Path(directory).resolve()
     return f'''[Unit]
-Description=OBDWhiz Raspberry Pi diagnostic workbench
-After=bluetooth.service network.target
+Description=ProActive Raspberry Pi diagnostic workbench
+After=bluetooth.service network.target local-fs.target
 Requires=bluetooth.service
 
 [Service]

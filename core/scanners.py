@@ -37,6 +37,17 @@ ASSIGNMENT_FIELDS = ('id', 'scannerId', 'vehicleId', 'startedAt', 'endedAt', 'me
 PROFILE_FIELDS = ('name', 'manufacturer', 'model', 'firmware', 'ownership', 'notes', 'controller')
 MODE = {'stored': '03', 'pending': '07', 'permanent': '0A'}
 SOFTWARE_VERSION = (Path(__file__).resolve().parents[1] / 'VERSION').read_text(encoding='utf-8').strip()
+MERCEDES_SERVICE = 'https://developer.mercedes-benz.com/products/workshop_information'
+FORD_SERVICE = 'https://www.motorcraftservice.com/Diagnostic/HelmSupport?categoryId=238&channelId=41&country=USA&language=EN-US'
+SPECIAL_FUNCTIONS = {
+    'mercedes_service_mode': {'label': 'Service mode', 'makes': ('mercedesbenz', 'mercedes', 'mercedesamg'),
+                              'tool': 'Mercedes-Benz XENTRY', 'reference': MERCEDES_SERVICE},
+    'mercedes_rear_brakes': {'label': 'Rear brake service / retract parking brake',
+                              'makes': ('mercedesbenz', 'mercedes', 'mercedesamg'),
+                              'tool': 'Mercedes-Benz XENTRY', 'reference': MERCEDES_SERVICE},
+    'ford_tire_size': {'label': 'Tire size calibration', 'makes': ('ford',), 'input': 'tireSize',
+                       'tool': 'Ford service information and compatible diagnostic software', 'reference': FORD_SERVICE},
+}
 
 
 def compare_codes(before, after):
@@ -296,14 +307,24 @@ class ScannerRegistry:
             WHERE status='needs_confirmation' AND completed<?""",
             (now(), json.dumps({'message':'VIN confirmation expired. Verify the scanner again.'}), deadline))
 
-    def enqueue(self, scanner_id, vehicle_id, actor, kind):
-        if kind not in ('verify', 'scan'):
+    def enqueue(self, scanner_id, vehicle_id, actor, kind, *, tire_size=None):
+        special = SPECIAL_FUNCTIONS.get(kind)
+        if kind not in ('verify', 'scan') and not special:
             raise ValueError('Choose VIN verification or a diagnostic scan.')
         with self.lock, self.db:
             self.expire_confirmations()
             self.get(scanner_id)
             if vehicle_id:
                 self.dossiers.get(vehicle_id)
+            detail = {}
+            if special:
+                assignment = self.special_target(scanner_id, vehicle_id, kind)
+                detail = {'assignmentId': assignment['id'], 'expectedVin': assignment['verifiedVin']}
+                if special.get('input') == 'tireSize':
+                    size = tire_size.strip().upper() if isinstance(tire_size, str) else ''
+                    if not re.fullmatch(r'(?:(?:LT|P)?\d{3}/\d{2}R\d{2}|\d{2}(?:\.\d{1,2})?X\d{1,2}(?:\.\d{1,2})?R\d{2})', size):
+                        raise ValueError('Enter a tire size such as LT275/70R18 or 35x12.50R20.')
+                    detail['requestedTireSize'] = size
             if kind == 'scan':
                 target = self.current(scanner_id=scanner_id)
                 if not target or target['vehicleId'] != vehicle_id:
@@ -313,10 +334,19 @@ class ScannerRegistry:
             job_id = uid()
             try:
                 self.db.execute('INSERT INTO scan_jobs VALUES(?,?,?,?,?,\'queued\',?,NULL,NULL,NULL,?)',
-                                (job_id, scanner_id, vehicle_id, actor, kind, now(), '{}'))
+                                (job_id, scanner_id, vehicle_id, actor, kind, now(), json.dumps(detail)))
             except sqlite3.IntegrityError as exc:
                 raise ValueError('This scanner already has an active job. Check its status in the scanner profile.') from exc
         return self.job(job_id)
+
+    def special_target(self, scanner_id, vehicle_id, kind):
+        assignment = self.current(scanner_id=scanner_id)
+        if not assignment or assignment['vehicleId'] != vehicle_id or not assignment['verifiedVin']:
+            raise ValueError('Choose a scanner with a verified assignment to this vehicle.')
+        make = re.sub(r'[^a-z]', '', (assignment['vehicle'].get('make') or '').lower())
+        if make not in SPECIAL_FUNCTIONS[kind]['makes']:
+            raise ValueError('This function is not listed for the assigned vehicle make.')
+        return assignment
 
     def next_job(self):
         with self.lock:

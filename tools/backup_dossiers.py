@@ -11,6 +11,10 @@ import tempfile
 from datetime import datetime, timezone
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from core.storage import Storage
+from core.store import DATABASE_FILENAME, LEGACY_DATABASE_FILENAME
+
 CONFIG = ('access.key', 'receiver.json')
 
 
@@ -37,8 +41,11 @@ def backup(data, media, destination, settings=None):
     destination.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.backup-', dir=destination) as directory:
         staging = Path(directory)
-        source = database(data / 'apex.sqlite3')
-        snapshot = sqlite3.connect(staging / 'apex.sqlite3')
+        source_file = data / DATABASE_FILENAME
+        if not source_file.exists():
+            source_file = data / LEGACY_DATABASE_FILENAME
+        source = database(source_file)
+        snapshot = sqlite3.connect(staging / DATABASE_FILENAME)
         try:
             source.backup(snapshot)
             snapshot.execute('PRAGMA journal_mode=DELETE')
@@ -64,7 +71,7 @@ def backup(data, media, destination, settings=None):
         manifest = {p.relative_to(staging).as_posix(): digest(p) for p in staging.rglob('*') if p.is_file()}
         (staging / 'manifest.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')
         verify(staging)
-        published = destination / ('obdwhiz-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ'))
+        published = destination / ('proactive-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ'))
         staging.rename(published)
         return published
 
@@ -74,13 +81,14 @@ def verify(directory):
     manifest = json.loads((directory / 'manifest.json').read_text(encoding='utf-8'))
     files = {p.relative_to(directory).as_posix() for p in directory.rglob('*')
              if p.is_file() and p.relative_to(directory).as_posix() != 'manifest.json'}
-    if set(manifest) != files or 'apex.sqlite3' not in files:
+    database_name = DATABASE_FILENAME if DATABASE_FILENAME in files else LEGACY_DATABASE_FILENAME
+    if set(manifest) != files or database_name not in files:
         raise ValueError('Backup files do not match the manifest.')
     for relative, sha in manifest.items():
         path = directory / relative
         if directory not in path.resolve().parents or digest(path) != sha:
             raise ValueError(f'Backup verification failed for {relative}.')
-    db = database(directory / 'apex.sqlite3', immutable=True)
+    db = database(directory / database_name, immutable=True)
     try:
         if db.execute('PRAGMA integrity_check').fetchone() != ('ok',) or db.execute('PRAGMA foreign_key_check').fetchone():
             raise ValueError('Backup database integrity check failed.')
@@ -102,7 +110,8 @@ def restore(source, target):
     with tempfile.TemporaryDirectory(prefix='.restore-', dir=target.parent) as directory:
         staging = Path(directory)
         for relative in manifest:
-            copy(source / relative, staging / relative)
+            name = DATABASE_FILENAME if relative == LEGACY_DATABASE_FILENAME else relative
+            copy(source / relative, staging / name)
         staging.rename(target)
     return target
 
@@ -125,8 +134,9 @@ def main():
             from dotenv_settings import deployment_settings
             settings = ROOT / '.env'
             values = deployment_settings(settings)
-            data = args.data or Path(values.get('OBDWHIZ_DATA_DIR') or ROOT / '.local')
-            media = args.media or Path(values.get('OBDWHIZ_MEDIA_DIR') or data / 'media')
+            data, media = Storage(ROOT, values).paths() if not args.data else (
+                args.data, Path(values.get('OBDWHIZ_MEDIA_DIR') or args.data / 'media'))
+            media = args.media or media
             print(backup(data, media, args.destination, settings))
         elif args.action == 'verify':
             print(f'Verified {len(verify(args.source))} files.')

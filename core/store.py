@@ -1,4 +1,5 @@
 import csv
+from contextlib import closing
 import datetime as dt
 import hashlib
 import io
@@ -16,6 +17,56 @@ DEFINITION_TEXT_FIELDS = ('make', 'model', 'ecu', 'code', 'description', 'source
 DEFINITION_COLUMNS = (*DEFINITION_TEXT_FIELDS, 'yearFrom', 'yearTo')
 MAX_DEFINITIONS = 5000
 DTC_DATA = Path(__file__).resolve().parents[1] / 'data'
+DATABASE_FILENAME = 'proactive.sqlite3'
+LEGACY_DATABASE_FILENAME = 'apex.sqlite3'
+
+
+def configured_data_mount(settings):
+    value = settings.get('OBDWHIZ_DATA_MOUNT')
+    if not value:
+        return None
+    mount = Path(value)
+    if not mount.is_absolute():
+        raise ValueError('OBDWHIZ_DATA_MOUNT must be an absolute mount point for the external drive.')
+    mount = mount.resolve()
+    if mount == Path(mount.anchor):
+        raise ValueError('Choose a dedicated mount point for the ProActive data drive.')
+    return mount
+
+
+def data_directory(root, settings):
+    local = (Path(root) / '.local').resolve()
+    mount = configured_data_mount(settings)
+    directory = Path(settings.get('OBDWHIZ_DATA_DIR') or (mount / 'proactive' if mount else local)).resolve()
+    if mount:
+        if not mount.is_mount():
+            raise ValueError(f'The ProActive data drive is not mounted at {mount}.')
+        if not directory.is_relative_to(mount):
+            raise ValueError('OBDWHIZ_DATA_DIR must be on the configured ProActive data drive.')
+        names = (DATABASE_FILENAME, LEGACY_DATABASE_FILENAME)
+        if any((local / name).is_file() for name in names) and not any(
+                (directory / name).is_file() for name in names):
+            raise ValueError(f'Copy the existing ProActive data from {local} to {directory} before starting.')
+    return directory
+
+
+def app_database(directory):
+    directory = Path(directory)
+    current = directory / DATABASE_FILENAME
+    legacy = directory / LEGACY_DATABASE_FILENAME
+    if current.exists() or not legacy.is_file():
+        return current
+    try:
+        # Fold any committed WAL pages into the database before moving its file.
+        uri = legacy.resolve().as_uri() + '?mode=rw'
+        with closing(sqlite3.connect(uri, uri=True, timeout=10)) as db:
+            if db.execute('PRAGMA journal_mode=DELETE').fetchone() != ('delete',):
+                raise sqlite3.OperationalError('Could not checkpoint the database before renaming it.')
+        legacy.rename(current)
+    except (FileNotFoundError, sqlite3.OperationalError):
+        if not current.is_file() or legacy.exists():
+            raise
+    return current
 
 
 def definition_source_batches(data):

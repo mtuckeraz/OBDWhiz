@@ -7,7 +7,7 @@ case "${1:-}" in
   '') ;;
   --service) service=true ;;
   -h|--help)
-    printf 'Usage: bash install-pi.sh [--service]\nInstalls Python and Bluetooth dependencies. --service also starts OBDWhiz at boot.\n'
+    printf 'Usage: bash install-pi.sh [--service]\nInstalls Python and Bluetooth dependencies. --service also starts ProActive at boot.\n'
     exit 0 ;;
   *) printf 'Unknown option: %s\n' "$1" >&2; exit 2 ;;
 esac
@@ -69,13 +69,13 @@ fi
 if ! .venv/bin/python tools/check_bluetooth.py; then
   printf '\nInstallation finished, but Bluetooth needs attention; see the check above.\n' >&2
 fi
-printf '\nOBDWhiz installed.\n'
+printf '\nProActive installed.\n'
 if "$service"; then
   printf 'The boot service is running with the new groups. Open http://%s.local:8787 from your phone or laptop.\n' "$(hostname -s)"
 else
   printf 'Log out/in before using the manual launcher so device groups take effect.\n'
   printf 'Then run: bash Start-OBDWhiz.sh --lan\n'
 fi
-printf '\nSign in to OBDWhiz with your username and password. New installations require a password change at first sign-in.\n'
+printf '\nSign in to ProActive with your username and password. New installations require a password change at first sign-in.\n'
 printf 'Bluetooth scan check: .venv/bin/python tools/check_bluetooth.py --scan\n'
 printf 'After installation, Bluetooth power, discovery, pairing and PIN entry are available in the web interface.\n'

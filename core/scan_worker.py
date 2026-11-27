@@ -5,6 +5,7 @@ import sys
 
 from .adapter import Adapter
 from .dossiers import now
+from .scanners import SPECIAL_FUNCTIONS
 from .store import VEHICLE_FIELDS, normalize_vin
 
 
@@ -48,11 +49,11 @@ class ScanWorker:
                 try:
                     await asyncio.wait_for(self.execute(job), timeout=240)
                 except asyncio.CancelledError:
-                    self.registry.transition(job['id'], 'failed', {'message': 'Interrupted by service shutdown.'})
+                    self.registry.transition(job['id'], 'failed', {**job['detail'], 'message': 'Interrupted by service shutdown.'})
                     raise
                 except Exception as exc:
                     self.registry.transition(job['id'], 'failed',
-                                             {'message': str(exc) or 'The scanner did not respond in time.'})
+                                             {**job['detail'], 'message': str(exc) or 'The scanner did not respond in time.'})
 
     async def session_for(self, session, scanner):
         address, transport = scanner['address'], scanner['transport']
@@ -69,6 +70,11 @@ class ScanWorker:
         await session.connect({'transport': transport, 'id': address, 'name': scanner['name']})
 
     async def execute(self, job):
+        special = job['type'] in SPECIAL_FUNCTIONS
+        if special:
+            target = self.registry.special_target(job['scannerId'], job['vehicleId'], job['type'])
+            if target['id'] != job['detail']['assignmentId'] or target['verifiedVin'] != job['detail']['expectedVin']:
+                raise ValueError('The scanner assignment changed. Select the vehicle and submit a new request.')
         scanner = self.registry.get(job['scannerId'])
         same_link = (self.adapter.state['connected'] and self.adapter.connection_address == scanner['address']
                      and self.adapter.state['transport'] == scanner['transport'])
@@ -90,6 +96,12 @@ class ScanWorker:
                 await session.initialize(spec)
             self.registry.capabilities(scanner['id'], session.state)
             vin = normalize_vin(await session.read_vin())
+            if special:
+                if not vin or vin != job['detail']['expectedVin']:
+                    raise ValueError('The vehicle did not return the VIN recorded for this scanner.')
+                self.registry.transition(job['id'], 'complete', {**job['detail'], 'confirmedVin': vin,
+                    'message': 'Vehicle VIN confirmed. Complete the service operation using the listed OEM tool.'})
+                return
             target = self.registry.inspect_vin(job, scanner, vin)
             if not target:
                 return
@@ -97,6 +109,8 @@ class ScanWorker:
             vehicle['vin'] = vin
             await session.scan(vehicle, require_verified_vin=True, job_id=job['id'])
         except Exception as exc:
+            if special:
+                raise
             message = str(exc) or 'The scanner did not respond in time.'
             self.registry.store.save_scan({
                 'vehicle': {}, 'codes': [], 'scanStatus': 'failed', 'source': 'Scanner job',

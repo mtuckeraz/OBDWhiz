@@ -1,4 +1,4 @@
-# OBDWhiz — Raspberry Pi diagnostic workbench
+# ProActive — Raspberry Pi diagnostic workbench
 
 A local diagnostic application primarily packaged for **Raspberry Pi 4 (8 GB)**, with a direct **Carista EVO → Pi Bluetooth → OBDWhiz** workflow. The Python server, SQLite history and Bluetooth connection run on the Pi. Open the web interface from a phone or laptop on the same local network. Receiver setup, Bluetooth power, pairing PINs and confirmations are handled in the browser; users do not need the Pi desktop or SSH. AI research uses an external API; no local AI model is required.
 
@@ -152,7 +152,7 @@ Continuous logging grows the data directory. No diagnostic history is automatica
 
 ## Windows (secondary)
 
-Requires Windows 10/11, Python 3.11+ and working Bluetooth. Double-click **Start-Apex.cmd**, or run `Start-Apex.ps1`. The legacy launcher name remains for compatibility; it installs the Python libraries in a Windows `.venv`, starts OBDWhiz and opens a browser. Linux system packages and the Pi installer are not used on Windows.
+Requires Windows 10/11, Python 3.11+ and working Bluetooth. Double-click **Start-ProActive.cmd**, or run `Start-ProActive.ps1`. The launcher installs the Python libraries in a Windows `.venv`, starts ProActive and opens a browser.
 
 ## Build a distributable Pi archive
 
@@ -201,7 +201,7 @@ Historical Windows testing verified real scans, VIN grouping and live polling on
 
 ## Saved vehicles and VINs
 
-The Overview lists vehicles alphabetically by **make, then model**. A VIN identifies one vehicle, and the **Scan session** selector opens its previous scans with newer sessions first. Cars with the same make/model but different VINs remain separate. Scans without a VIN are not automatically merged. The saved vehicle count excludes demo records.
+The **Vehicles** panel on Overview shows the five latest vehicle scans, newest first. A VIN identifies one vehicle, and the **Scan session** selector opens its previous scans with newer sessions first. Cars with the same make/model but different VINs remain separate. Scans without a VIN are not automatically merged.
 
 Mode 09 PID 02 captures the VIN automatically on supported CAN vehicles. The full VIN is stored in SQLite and JSON exports, and displayed on vehicle cards and scan details. Imported VINs are normalized to uppercase and validated as 17 letters/digits excluding I, O and Q. VINs remain local and are omitted from AI requests.
 
@@ -265,7 +265,7 @@ The example URL is a placeholder. Use the source reference to check software and
 
 ## Storage and security
 
-SQLite data lives in `.local/apex.sqlite3`. This legacy filename, the internal `X-Apex-Client` header and browser storage keys are retained to preserve existing installations; the application is named OBDWhiz. Up to 10,000 polling cycles are retained per scan; UI/JSON exports return the most recent 200. Scan snapshots and their request/response traces remain saved. The runtime adapter trace is bounded to 2,000 entries. Export JSON includes VIN/raw evidence, so review it before sharing.
+SQLite data lives in `.local/proactive.sqlite3`. On first startup, ProActive upgrades the previous `apex.sqlite3` filename in the data directory. Up to 10,000 polling cycles are retained per scan, and UI/JSON exports return the most recent 200. Scan snapshots and their request/response traces remain saved. The runtime adapter trace is bounded to 2,000 entries. Export JSON includes VIN/raw evidence.
 
 The installed service listens on the LAN and requires account sign-in for all private API routes, including Bluetooth operations, even from localhost. Static sign-in assets are public. Sessions use HttpOnly/SameSite cookies, failed sign-ins are rate limited, Host names are limited to the Pi hostname or the receiving interface address, cross-origin requests are blocked, and mutations require a custom header. It does not expose keys through its API. HTML is escaped and report/source links are restricted to HTTP(S). No remote scripts, fonts or analytics are loaded. Named accounts share receiver control and scan history. Administrators can manage accounts, settings and existing vehicle details. Users can view records, run diagnostics and contribute evidence. Use it on a trusted local network; HTTP does not encrypt traffic. Do not expose it through public router port forwarding. Bluetooth receiver preferences live under the ignored `.local` directory.
 

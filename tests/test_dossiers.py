@@ -66,7 +66,7 @@ class DossierTests(unittest.TestCase):
         stopped.wait(2)
         self.store.db.close()
 
-    def request(self, path, body=None, cookie=None, raw=None, metadata=None):
+    def request(self, path, body=None, cookie=None, raw=None, metadata=None, method=None):
         headers = {'X-Apex-Client': '1'}
         if cookie:
             headers['Cookie'] = cookie
@@ -75,7 +75,7 @@ class DossierTests(unittest.TestCase):
             headers['X-Upload-Metadata'] = quote(json.dumps(metadata), safe='')
         conn = HTTPConnection('127.0.0.1', self.server.server_port, timeout=20)
         try:
-            conn.request('POST' if data is not None else 'GET', path, body=data, headers=headers)
+            conn.request(method or ('POST' if data is not None else 'GET'), path, body=data, headers=headers)
             response = conn.getresponse()
             return response.status, dict(response.getheaders()), response.read()
         finally:
@@ -124,13 +124,35 @@ class DossierTests(unittest.TestCase):
         self.assertIsNotNone(owners[1]['endedAt'])
         self.api('/api/dossiers', {'vin': vehicle['vin']}, 400)
 
+    def test_garaging_location_and_profile_notes_persist_independently_of_dated_notes(self):
+        vehicle = self.vehicle()
+        path = '/api/dossiers/' + vehicle['id']
+        profile = {'garagingLocation': 'North garage · Bay 4', 'profileNotes': 'Fleet unit 12\nKeep key at reception.'}
+        self.api(path, profile, 200)
+        self.api(path + '/note', {'value': 'Arrival documented.'}, 201)
+        self.api(path, {'color': 'Blue'}, 200)
+        detail = self.api(path)
+        for field, value in profile.items():
+            self.assertEqual(detail[field], value)
+        self.assertEqual([note['body'] for note in detail['notes']], ['Arrival documented.'])
+        self.api(path, {'garagingLocation': '', 'profileNotes': ''}, 200)
+        detail = self.api(path)
+        self.assertEqual(detail['garagingLocation'], '')
+        self.assertEqual(detail['profileNotes'], '')
+        self.assertEqual(len(detail['notes']), 1)
+
     def test_role_permissions_and_protected_media(self):
         self.api('/api/staff', {'username': 'tech', 'name': 'Technician 03',
                                'password': 'example-only-passphrase', 'role': 'user'}, 201)
         tech = self.change_password(self.login('tech', 'example-only-passphrase'), 'example-personal-passphrase')
         v = self.vehicle()
+        self.api('/api/storage', code=403, cookie=tech)
+        self.api('/api/storage', {'drive': 'system'}, 403, tech)
         self.api('/api/staff', code=403, cookie=tech)
         self.api('/api/dossiers/' + v['id'], {'owner': 'Different'}, 403, tech)
+        for path in ('/api/dossiers/' + v['id'], '/api/scans/' + self.legacy['id']):
+            self.assertEqual(self.request(path, method='DELETE')[0], 401)
+            self.assertEqual(self.request(path, cookie=tech, method='DELETE')[0], 403)
         image = self.upload(v, photo('JPEG'), cookie=tech)
         self.assertEqual(image['uploaderName'], 'Technician 03')
         path = '/api/media/' + image['id']
@@ -138,6 +160,51 @@ class DossierTests(unittest.TestCase):
             self.assertEqual(self.request(path + variant)[0], 401)
             self.assertEqual(self.request(path + variant, cookie=tech)[0], 200)
         self.api(path + '/metadata', {'caption': 'Edited by uploader'}, 200, tech)
+
+    def test_delete_scan_removes_its_artifacts_but_preserves_vehicle_and_other_scans(self):
+        vehicle = self.api('/api/dossiers?q=901234')[0]
+        scan = self.legacy
+        archive = self.store.diagnostic_file(scan['id'])
+        self.store.samples(scan['id'], [{'time': scan['createdAt'], 'value': 14.0}])
+        other = self.store.save_scan({'vehicle': {}, 'vin': scan['vin'], 'codes': []})
+        path = '/api/scans/' + scan['id']
+        self.assertEqual(self.request(path, cookie=self.admin, method='DELETE')[0], 200)
+        self.assertEqual(self.request(path, cookie=self.admin, method='DELETE')[0], 404)
+        self.api(path, code=404)
+        self.api(path + '/diagnostic', code=404)
+        self.assertFalse(archive.exists())
+        self.assertEqual(self.store.samples(scan['id']), [])
+        detail = self.api('/api/dossiers/' + vehicle['id'])
+        self.assertEqual([record['id'] for record in detail['scans']], [other['id']])
+
+    def test_delete_vehicle_removes_its_files_and_notes_but_preserves_the_scan(self):
+        vehicle = self.api('/api/dossiers?q=901234')[0]
+        path = '/api/dossiers/' + vehicle['id']
+        registry = self.adapter.scan_worker.registry
+        address = 'AA:BB:CC:DD:EE:FF'
+        scanner = registry.register({'address': address, 'transport': 'ble'})
+        registry.fleet.register({'address': address, 'controller': '/org/bluez/hci0', 'vin': vehicle['vin']})
+        with self.store.lock, self.store.db:
+            registry.assign(scanner['id'], vehicle['id'], 'obd_vin', vehicle['vin'], 'test')
+        scan = self.store.save_scan({'vehicle': {}, 'vin': vehicle['vin'], 'codes': [],
+                                     'scannerEvidence': {'address': address, 'transport': 'ble'}})
+        self.assertEqual(scan['vehicleId'], vehicle['id'])
+        media = self.upload(vehicle, photo('JPEG'))
+        image_dir = self.root / 'private-media' / vehicle['id'] / media['id']
+        self.assertTrue(image_dir.is_dir())
+        self.api(path + '/note', {'value': 'Parking instructions'}, 201)
+        self.api(path + '/visit', {'value': 'Arrival'}, 201)
+        archive = self.store.diagnostic_file(self.legacy['id'])
+        self.assertEqual(self.request(path, cookie=self.admin, method='DELETE')[0], 200)
+        self.api(path, code=404)
+        self.assertEqual(self.api('/api/dossiers?q=901234'), [])
+        self.api('/api/media/' + media['id'] + '/original', code=404)
+        self.assertFalse(image_dir.exists())
+        self.assertTrue(archive.is_file())
+        self.api('/api/scans/' + self.legacy['id'])
+        self.assertIsNone(registry.current(scanner_id=scanner['id']))
+        self.assertFalse(registry.fleet.reader(address)['enabled'])
+        self.assertNotIn('vehicleId', self.api('/api/scans/' + scan['id']))
 
     def test_default_credentials_require_change_and_old_sessions_are_revoked(self):
         pending = self.login('user', '123456')
@@ -203,14 +270,14 @@ class DossierTests(unittest.TestCase):
         snapshot = backup(self.data, self.root / 'private-media', self.root / 'backups')
         verify(snapshot)
         recovered = restore(snapshot, self.root / 'recovered')
-        database = sqlite3.connect(recovered / 'apex.sqlite3')
+        database = sqlite3.connect(recovered / 'proactive.sqlite3')
         try:
             self.assertEqual(database.execute('SELECT count(*) FROM dossier_media').fetchone()[0], 22)
             self.assertEqual(database.execute('SELECT count(*) FROM dossier_visits').fetchone()[0], 1)
         finally:
             database.close()
         source = photos[0]
-        reopened = Store(recovered / 'apex.sqlite3')
+        reopened = Store(recovered / 'proactive.sqlite3')
         try:
             restored_dossiers = Dossiers(reopened)
             archive = Media(restored_dossiers, recovered / 'media')

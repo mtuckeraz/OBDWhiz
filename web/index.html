@@ -1,10 +1,10 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#101413"><title>OBDWhiz · Diagnostic workbench</title><link rel="icon" href="/logo.svg" type="image/svg+xml"><link rel="stylesheet" href="/styles.css"><script src="/app.js" defer></script><script src="/dossiers.js" defer></script><script src="/scanners.js" defer></script></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#101413"><title>ProActive · Diagnostic workbench</title><link rel="icon" href="/logo.svg" type="image/svg+xml"><link rel="stylesheet" href="/styles.css"><script src="/app.js" defer></script><script src="/dossiers.js" defer></script><script src="/scanners.js" defer></script></head>
 <body class="signed-out">
-<main id="login-screen" class="login-screen" aria-label="OBDWhiz account">
+<main id="login-screen" class="login-screen" aria-label="ProActive account">
   <section class="panel login-panel">
-    <header class="login-brand"><img src="/logo.svg" width="42" height="42" alt=""><strong>OBDWhiz</strong></header>
+    <header class="login-brand"><img src="/logo.svg" width="42" height="42" alt=""><strong>ProActive</strong></header>
     <form id="login-form" hidden>
       <h1>Sign in</h1>
       <label>Username<input id="staff-login" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="40"></label>
@@ -26,7 +26,7 @@
   </section>
 </main>
 <aside class="sidebar">
-  <a class="brand" href="#workspace"><img src="/logo.svg" width="38" height="38" alt=""><span>OBDWhiz<small>DIAGNOSTIC WORKBENCH</small></span></a>
+  <a class="brand" href="#workspace"><img src="/logo.svg" width="38" height="38" alt=""><span>ProActive<small>DIAGNOSTIC WORKBENCH</small></span></a>
   <p class="nav-label">WORKSPACE</p>
   <nav aria-label="Main navigation">
     <button data-view="workspace" class="nav active"><span>▦</span> Overview</button>
@@ -45,11 +45,12 @@
         <path d="M9 17h1m4 0h1"/>
       </svg>Scanner Inventory
     </button>
+    <button data-view="special" class="nav" aria-label="Special Functions"><svg class="nav-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M9 3v8m0 4v6m6-18v4m0 4v10M6 11h6v4H6zM12 7h6v4h-6z"/></svg> Special Functions</button>
     <button data-view="library" class="nav"><span>▤</span> OEM reference library</button>
     <button data-view="notifications" class="nav" data-admin-only aria-label="Notifications"><svg class="nav-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg> Notifications</button>
     <button data-view="setup" class="nav"><span>◈</span> Setup</button>
   </nav>
-  <div class="sidebar-bottom"><div class="local-badge"><span class="dot"></span> Local workspace</div><p>Raspberry Pi Bluetooth → local HTTP<br>Your scan history stays here.</p><span class="version">OBDWhiz / v0.6.0</span></div>
+  <div class="sidebar-bottom"><div class="local-badge"><span class="dot"></span> Local workspace</div><p>Raspberry Pi Bluetooth → local HTTP<br>Your scan history stays here.</p><span class="version">ProActive / v0.6.0</span></div>
 </aside>
 <div class="main-wrap">
 <header class="topbar"><div><span class="breadcrumb">WORKSPACE</span><span id="view-name">Overview</span></div><div class="actions"><button id="connection-badge" class="badge neutral" data-view="connection">Adapter disconnected</button><button id="sign-out" class="text-button" hidden>Sign out</button></div></header>
@@ -57,14 +58,14 @@
 <section id="workspace" class="view active">
   <div class="page-title"><div><p class="eyebrow">CLARITY FROM EVERY SCAN</p><h1>Your diagnostic workspace.</h1><p class="muted">Connect. Read the evidence. Find the next step.</p></div><div class="actions"><button class="button secondary" id="import-scan">Import scan</button><button class="button primary" data-view="connection">Connect adapter</button></div></div>
   <div class="stats"><article><span>SAVED VEHICLES</span><strong id="vehicle-count">0</strong><p id="session-count">Stored on the Pi</p></article><article><span>ADAPTER</span><strong id="adapter-summary">Offline</strong><p id="adapter-detail">Carista EVO · direct Bluetooth</p></article><article><span>AI RESEARCH</span><strong id="ai-summary">Not configured</strong><p>Cited causes & diagnostic checks</p></article></div>
-  <div class="work-grid"><section class="panel history"><div class="panel-heading"><h2>Vehicles</h2><span class="muted small">Make / model A–Z</span></div><div id="scan-list"></div><button class="text-button" id="demo">Explore a demo scan</button></section>
+  <div class="work-grid"><section class="panel history"><div class="panel-heading"><h2>Vehicles</h2><span class="muted small">Latest 5 scans</span></div><div id="scan-list"></div></section>
     <section class="panel detail"><div id="scan-detail"><div class="empty hero-empty"><div class="scan-symbol">⌁</div><p class="eyebrow">READY WHEN YOU ARE</p><h2>Start with a clear picture.</h2><p>Connect your Carista EVO to read fault codes and available live values. Or import a manufacturer scan to investigate more modules.</p><button class="button primary" data-view="connection">Set up a vehicle</button></div></div></section></div>
 </section>
 <section id="scanners" class="view">
   <div class="page-title"><div><h1>Scanner Inventory</h1><p class="muted">Register adapters and verify their vehicle assignments.</p></div></div>
   <p id="scanner-message" role="status"></p>
-  <div id="scanner-list" class="dossier-grid"></div>
-  <section id="scanner-profile" class="panel spaced" hidden></section>
+  <div id="scanner-list" class="scanner-list"></div>
+  <div id="scanner-profile" class="scanner-profile" hidden></div>
   <details class="panel spaced" data-admin-only>
     <summary>Register a scanner</summary>
     <form id="scanner-register">
@@ -117,6 +118,22 @@
   </form><p class="muted small spaced">Saving details updates scan labels for the same VIN. An entered VIN is checked against the connected vehicle before a scan is saved.</p>
   <div class="notice"><strong>Standard OBD-II coverage</strong><p>Reads stored, pending and permanent emissions codes, VIN, monitor status and frame-zero evidence where supported. ABS, airbag, body and other manufacturer modules need verified vehicle-specific support or an imported scan.</p></div></section></div>
 </section>
+<section id="special" class="view">
+  <div class="page-title"><div><h1>Special Functions</h1><p class="muted">Verify the vehicle before starting an OEM service operation.</p></div></div>
+  <div class="two-col">
+    <form id="special-form" class="panel">
+      <label>Select vehicle<select name="scanner" required><option value="">Select an assigned scanner</option></select></label>
+      <label>Special function<select name="operation" required disabled><option value="">Select a vehicle first</option></select></label>
+      <label id="special-tire-size" hidden>Requested tire size<input name="tireSize" maxlength="24" placeholder="LT275/70R18"></label>
+      <p id="special-function-guidance" class="muted"></p>
+      <button type="submit" class="button primary" disabled>Execute VIN check</button>
+    </form>
+    <section class="panel"><h2>Request status</h2>
+      <p class="muted">A confirmed VIN means the vehicle responded to the identity check. The service operation is performed and verified in the listed OEM tool.</p>
+      <div id="special-status" role="status">Select a vehicle and function to begin.</div>
+    </section>
+  </div>
+</section>
 <section id="library" class="view">
   <div class="page-title"><div><h1>DTC reference library</h1><p class="muted">Search generic OBD-II codes and manufacturer references by code, make, model, or description.</p></div></div>
   <section class="panel"><div class="panel-heading"><h2>Code catalog</h2><span id="definition-count" class="badge" role="status"></span></div>
@@ -144,7 +161,7 @@
   <details><summary>JSON example</summary><p>Upload a definitions object or an array of definition records.</p><pre id="definition-format"></pre></details>
   <details><summary>CSV example</summary><p>Save as UTF-8 CSV with the header row shown below. Use quotes around fields that contain commas or line breaks.</p><pre>make,model,yearFrom,yearTo,ecu,code,description,sourceUrl,reference
 BMW,750e,2025,2026,DME,P0300,"Misfire detected, multiple cylinders",https://manufacturer.example/service-reference,"Document ID, revision and page"</pre></details></section>
-  <section class="panel spaced"><h2>Bring in an OEM scan</h2><p class="muted">Use JSON exports in the OBDWhiz schema, including manually transcribed results from a licensed manufacturer tool. Raw OEM / UDS codes and module names are preserved. Other vendor file formats need conversion first.</p><button class="button secondary" id="scan-format-button">Show scan JSON format</button><pre id="scan-format" hidden></pre></section>
+  <section class="panel spaced"><h2>Bring in an OEM scan</h2><p class="muted">Use JSON exports in the ProActive schema, including manually transcribed results from a licensed manufacturer tool. Raw OEM / UDS codes and module names are preserved. Other vendor file formats need conversion first.</p><button class="button secondary" id="scan-format-button">Show scan JSON format</button><pre id="scan-format" hidden></pre></section>
 </section>
 <section id="notifications" class="view">
   <div class="page-title"><div><h1>Notifications</h1><p class="muted">Email an alert when every code in a rule appears in the same live scan.</p></div></div>
@@ -173,7 +190,20 @@ BMW,750e,2025,2026,DME,P0300,"Misfire detected, multiple cylinders",https://manu
 <section id="setup" class="view">
   <div class="page-title"><div><p class="eyebrow">YOUR PI. YOUR WORKSPACE.</p><h1>Setup.</h1><p class="muted">Use this web interface from your phone or laptop. The Pi handles Bluetooth and stores scan history.</p></div><button type="button" data-view="setup/fleet" class="button secondary">Fleet Scans</button></div>
   <div class="two-col"><section class="panel"><h2>AI diagnosis & web research</h2><p class="muted">Research uses OpenAI's Responses API with web search. It needs your own API key and incurs API charges. An active job is limited to one scan at a time.</p><form id="ai-form" data-admin-only><label>OpenAI API key<input id="api-key" type="password" autocomplete="off" placeholder="Paste a key to enable research" maxlength="1000"></label><label>Model<select id="ai-model"><option value="">Keep current model</option><option value="gpt-6.2-astra">GPT-6.2 Astra</option><option value="gpt-6.2-sol">GPT-6.2 Sol</option><option value="gpt-6.1-terra">GPT-6.1 Terra</option><option value="gpt-6-luna">GPT-6 Luna</option></select></label><label class="check"><input type="checkbox" id="auto-research" checked> Automatically research real scans containing codes</label><button type="submit" class="button primary">Apply for this session</button><button type="button" class="button secondary" id="clear-key">Clear key</button></form><p class="muted small">Keys entered here stay in server memory until restart. For persistence, copy .env.example to .env and set OPENAI_API_KEY. Your key is never returned by the server.</p><div class="notice"><strong>What leaves the Pi</strong><p>When research runs, vehicle context, codes, selected snapshot readings, symptoms and matching reference descriptions are sent to OpenAI for web research. VIN, Bluetooth addresses, scan history and raw frames stay local. Internet research uses the provider's HTTPS connection; this website remains HTTP.</p></div></section>
-  <section class="panel align-start"><h2>Connection checklist</h2><ol class="setup-list"><li>In Adapter & vehicle, select the Pi Bluetooth radio and turn it on.</li><li>Plug in the Carista EVO and turn the vehicle ignition on.</li><li>Close Carista and any other app connected to the adapter.</li><li>Discover receivers and identify yours by its name, address and signal. Pair it if required, answer any PIN or confirmation here, then connect and initialize diagnostics.</li><li>Carista EVO uses Bluetooth LE. Other receivers need compatible BLE UART services, or a serial port already exposed to the Pi.</li><li>Enter exact vehicle context, scan, then choose live readings.</li></ol><p id="dependency-status" class="muted"></p><h3>Browser access</h3><p class="muted">The Pi owner supplies the web address and account details. Bluetooth discovery, pairing and PIN entry are handled on this page; users do not need the Pi desktop or SSH.</p><h3>Local storage</h3><p class="muted">Scans and up to 10,000 live polling cycles per scan are stored in .local/apex.sqlite3. JSON exports include the latest 200 saved cycles. Back up the .local folder with OBDWhiz stopped.</p><h3>Known limits</h3><p class="muted">An ELM-compatible adapter does not supply unpublished code definitions, OEM gateway credentials or manufacturer software. Adapter and vehicle compatibility must be verified on your hardware.</p></section></div>
+  <section class="panel align-start"><h2>Connection checklist</h2><ol class="setup-list"><li>In Adapter & vehicle, select the Pi Bluetooth radio and turn it on.</li><li>Plug in the Carista EVO and turn the vehicle ignition on.</li><li>Close Carista and any other app connected to the adapter.</li><li>Discover receivers and identify yours by its name, address and signal. Pair it if required, answer any PIN or confirmation here, then connect and initialize diagnostics.</li><li>Carista EVO uses Bluetooth LE. Other receivers need compatible BLE UART services, or a serial port already exposed to the Pi.</li><li>Enter exact vehicle context, scan, then choose live readings.</li></ol><p id="dependency-status" class="muted"></p><h3>Browser access</h3><p class="muted">The Pi owner supplies the web address and account details. Bluetooth discovery, pairing and PIN entry are handled on this page; users do not need the Pi desktop or SSH.</p><h3>Local storage</h3><p class="muted">Scans and up to 10,000 live polling cycles per scan are stored in proactive.sqlite3 in the configured data directory. JSON exports include the latest 200 saved cycles. Back up the data directory with ProActive stopped.</p><h3>Known limits</h3><p class="muted">An ELM-compatible adapter does not supply unpublished code definitions, OEM gateway credentials or manufacturer software. Adapter and vehicle compatibility must be verified on your hardware.</p></section></div>
+  <section id="pi-storage" class="panel spaced" data-admin-only hidden>
+    <div class="panel-heading"><h2>Storage</h2><button id="refresh-storage" type="button" class="button secondary">Refresh drives</button></div>
+    <dl>
+      <dt>Database</dt><dd id="storage-database"></dd>
+      <dt>Photos and documents</dt><dd id="storage-media"></dd>
+    </dl>
+    <form id="storage-form">
+      <label>Storage drive<select name="drive" required></select></label>
+      <p class="muted small">Choose a mounted drive the Pi can write to. ProActive will restart, copy the database and files, and keep the original on the previous drive.</p>
+      <button id="move-storage" class="button primary">Move storage and restart</button>
+    </form>
+    <p id="storage-status" role="status"></p>
+  </section>
   <section id="dossier-admin" class="panel spaced" data-admin-only hidden>
     <h2>Staff and location policy</h2>
     <form id="dossier-user-form">
@@ -222,6 +252,6 @@ BMW,750e,2025,2026,DME,P0300,"Misfire detected, multiple cylinders",https://manu
     </div>
   </section>
 </section>
-</main><footer><span>OBDWhiz DIAGNOSTIC WORKBENCH</span><span>Evidence first. Every time.</span></footer>
+</main><footer><span>ProActive DIAGNOSTIC WORKBENCH</span><span>Evidence first. Every time.</span></footer>
 </div><div id="toast" role="status" aria-live="polite" hidden></div><input type="file" id="file-input" accept=".json,application/json" hidden>
-</body></html>
+<script src="/special-functions.js" defer></script></body></html>

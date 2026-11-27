@@ -11,11 +11,17 @@ let toastTimer, refreshRunning = false;
 
 function toast(message, error=false) { const el = $('#toast'); el.textContent = message; el.classList.toggle('error', error); el.hidden=false; clearTimeout(toastTimer); toastTimer=setTimeout(()=>el.hidden=true, error ? 12000 : 5000); }
 async function api(path, body, fileType) {
-  const response = await fetch('/api' + path, body === undefined ? {} : {method:'POST', headers:{'Content-Type':fileType || 'application/json','X-Apex-Client':'1'}, body:fileType ? body : JSON.stringify(body)});
+  return apiRequest(path, body === undefined ? {} : {method:'POST', headers:{'Content-Type':fileType || 'application/json','X-Apex-Client':'1'}, body:fileType ? body : JSON.stringify(body)});
+}
+async function apiRequest(path, options) {
+  const response = await fetch('/api' + path, options);
   const data = await response.json();
   if(response.status===401 && path!=='/login')showLogin();
   if (!response.ok) throw new Error(data.error || 'Request failed');
   return data;
+}
+function deleteRecord(path) {
+  return apiRequest(path,{method:'DELETE',headers:{'X-Apex-Client':'1'}});
 }
 function showLogin(changePassword = false, username = '') {
   state.authenticated = false;
@@ -87,7 +93,7 @@ function view(name) {
   state.viewTarget = ['scanners', 'dossiers'].includes(name) && /^[0-9a-f-]{36}$/.test(target || '') ? target : null;
   state.view=name; $$('.view').forEach(el=>el.classList.toggle('active',el.id===name));
   $$('.nav').forEach(el=>el.classList.toggle('active',el.dataset.view===name));
-  $('#view-name').textContent = ({workspace:'Overview',connection:'Adapter & vehicle',dossiers:'Vehicle Scans',scanners:'Scanner Inventory',library:'DTC reference library',notifications:'Notifications',setup:'Setup'})[name];
+  $('#view-name').textContent = ({workspace:'Overview',connection:'Adapter & vehicle',dossiers:'Vehicle Scans',scanners:'Scanner Inventory',special:'Special Functions',library:'DTC reference library',notifications:'Notifications',setup:'Setup'})[name];
   const hash = fleetSetup ? '#setup/fleet' : '#'+name+(state.viewTarget ? '/'+state.viewTarget : '');
   if(location.hash!==hash)history.replaceState(null,'',hash);
   document.dispatchEvent(new CustomEvent('obd-view',{detail:name}));
@@ -176,9 +182,9 @@ function renderFleet() {
     $('#fleet-return-after').value=f.settings.returnAfterSeconds/60;
   }
   const signature=JSON.stringify(f.readers);
-  if($('#fleet-readers').dataset.signature!==signature){$('#fleet-readers').dataset.signature=signature;$('#fleet-readers').innerHTML=f.readers.map(r=>`<article class="fleet-reader"><div class="panel-heading"><strong>${E(r.label)}</strong><span class="badge ${r.lastError?'amber':r.scanFresh?'':'neutral'}">${r.scanFresh?'Fresh scan':E(r.lastScanStatus)}${r.lastCodeCount!=null?' · '+r.lastCodeCount+' code(s)':''}</span></div><p class="muted small">${E(r.address)} · ${E(r.presence)}${r.vin?' · VIN '+E(r.vin):' · VIN awaiting vehicle response'}</p><p class="muted small">Last scan: ${r.lastScanAt?E(fleetDate(r.lastScanAt)):'Not yet captured'}${r.lastScanAgeSeconds!=null?' · '+Math.round(r.lastScanAgeSeconds)+' seconds ago':''}</p>${r.lastError?`<p class="error-text">${E(r.lastError)}</p>`:''}<div class="actions">${r.lastScanId?`<a class="button secondary" href="/api/scans/${E(r.lastScanId)}/diagnostic">Diagnostic file</a>`:''}<button class="text-button" data-admin-only data-remove-reader="${E(r.address)}">Remove reader</button></div></article>`).join('')||'<p class="muted">Discover receivers in Adapter & vehicle, then Add to fleet. A manual connection also registers a Carista and starts its first scan automatically.</p>';}
+  if($('#fleet-readers').dataset.signature!==signature){$('#fleet-readers').dataset.signature=signature;$('#fleet-readers').innerHTML=f.readers.map(r=>`<article class="fleet-reader"><div class="panel-heading"><strong>${E(r.label)}</strong><span class="badge ${r.lastError?'amber':r.scanFresh?'':'neutral'}">${r.scanFresh?'Fresh scan':E(r.lastScanStatus)}${r.lastCodeCount!=null?' · '+r.lastCodeCount+' code(s)':''}</span></div><p class="muted small">${E(r.address)} · ${E(r.presence)}${r.vin?' · VIN '+E(r.vin):' · VIN awaiting vehicle response'}</p><p class="muted small">Last scan: ${r.lastScanAt?E(fleetDate(r.lastScanAt)):'Not yet captured'}${r.lastScanAgeSeconds!=null?' · '+Math.round(r.lastScanAgeSeconds)+' seconds ago':''}</p>${r.lastError?`<p class="error-text">${E(r.lastError)}</p>`:''}<div class="actions">${r.lastScanId?`<a class="button secondary" href="/api/scans/${E(r.lastScanId)}/summary.pdf">Diagnostic PDF</a><a class="text-button" href="/api/scans/${E(r.lastScanId)}/diagnostic">Diagnostic JSON</a>`:''}<button class="text-button" data-admin-only data-remove-reader="${E(r.address)}">Remove reader</button></div></article>`).join('')||'<p class="muted">Discover receivers in Adapter & vehicle, then Add to fleet. A manual connection also registers a Carista and starts its first scan automatically.</p>';}
   const events=state.fleetEvents.slice(-40).reverse();
-  $('#fleet-events').innerHTML=events.map(e=>`<div class="fleet-event"><strong>${E(e.type.replaceAll('_',' '))}${e.code?' · '+E(e.code):''}</strong><span class="muted small">${E(fleetDate(e.createdAt))} · ${E(e.address||'Fleet monitor')}${e.ecu?' · ECU '+E(e.ecu):''}${e.status?' · '+E(e.status):''}</span>${e.error?`<p class="error-text">${E(e.error)}</p>`:''}${e.scanId?`<a href="/api/scans/${E(e.scanId)}/diagnostic">Download dated diagnostic file</a>`:''}</div>`).join('')||'<p class="muted">Fleet events appear here as readers are detected and scanned.</p>';
+  $('#fleet-events').innerHTML=events.map(e=>`<div class="fleet-event"><strong>${E(e.type.replaceAll('_',' '))}${e.code?' · '+E(e.code):''}</strong><span class="muted small">${E(fleetDate(e.createdAt))} · ${E(e.address||'Fleet monitor')}${e.ecu?' · ECU '+E(e.ecu):''}${e.status?' · '+E(e.status):''}</span>${e.error?`<p class="error-text">${E(e.error)}</p>`:''}${e.scanId?`<a href="/api/scans/${E(e.scanId)}/summary.pdf">Download diagnostic PDF</a> &middot; <a href="/api/scans/${E(e.scanId)}/diagnostic">Diagnostic JSON</a>`:''}</div>`).join('')||'<p class="muted">Fleet events appear here as readers are detected and scanned.</p>';
 }
 $('#fleet-toggle').addEventListener('click',e=>action(e.target,async()=>{await api('/fleet/settings',{enabled:!state.fleet.settings.enabled});}));
 $('#fleet-schedule').addEventListener('input',e=>{e.currentTarget.dataset.dirty='true';});
@@ -223,14 +229,21 @@ $('#bluetooth-power').addEventListener('click',e=>action(e.target,async()=>{cons
 $('#pairing-form').addEventListener('submit',async e=>{e.preventDefault();const p=state.bluetooth?.pairing.prompt;if(!p)return;try{await api('/bluetooth/answer',{promptId:p.id,value:p.kind==='confirm'?true:$('#pairing-input').value});$('#pairing-input').value='';await refresh();}catch(error){toast(error.message,true);}});
 $('#pair-cancel').addEventListener('click',async()=>{try{await api('/bluetooth/cancel',{});await refresh();}catch(error){toast(error.message,true);}});
 function renderHistory() {
-  const signature=JSON.stringify([state.vehicles.map(g=>[g.key,g.vehicle,g.scans.map(s=>[s.id,s.codes.length]),g.lastScanAt]),state.selected?.id]);
-  if($('#scan-list').dataset.signature===signature)return;
-  $('#scan-list').dataset.signature=signature;
-  $('#scan-list').innerHTML=state.vehicles.length?state.vehicles.map(g=>{
-    const s=g.scans[0],v=g.vehicle;
-    const selected=g.scans.some(s=>s.id===state.selected?.id);
-    return `<button class="scan-row ${selected?'selected':''}" data-scan="${E(g.latestScanId)}"><strong>${E(v.make || 'Unknown make')} ${E(v.model || '')}</strong><div class="row-meta"><span>${E([v.year,v.trim,v.drivetrain].filter(Boolean).join(' · '))}</span></div><span class="vehicle-vin">${g.vin?'VIN · '+E(g.vin):'VIN not captured'}</span><div class="row-meta"><span>${g.scans.length} scan${g.scans.length===1?'':'s'}</span><span class="badge ${g.demo?'neutral':s.codes.length?'amber':''}">${g.demo?'DEMO':s.codes.length+' CODE'+(s.codes.length===1?'':'S')}</span></div><span class="muted small">Last scan · ${E(date(g.lastScanAt))}</span></button>`;
-  }).join(''):'<div class="empty"><p>No vehicles yet.<br>A scan will create a saved vehicle record.</p></div>';
+  const recent=state.scans.filter(scan=>!scan.demo)
+    .sort((a,b)=>b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id)).slice(0,5);
+  const list=$('#scan-list');
+  const signature=JSON.stringify([recent.map(s=>[s.id,s.vehicle,s.vin,s.createdAt,s.codes.length]),state.selected?.id]);
+  if(list.dataset.signature===signature)return;
+  list.dataset.signature=signature;
+  list.innerHTML=recent.map(s=>{
+    const vehicle=s.vehicle, codeCount=s.codes.length;
+    return `<button type="button" class="scan-row ${s.id===state.selected?.id?'selected':''}" data-scan="${E(s.id)}">
+      <strong>${E(vehicle.make || 'Unknown make')} ${E(vehicle.model || '')}</strong>
+      <span class="muted small">${E([vehicle.year,vehicle.trim,vehicle.drivetrain].filter(Boolean).join(' · '))}</span>
+      <span class="vehicle-vin">${s.vin?'VIN · '+E(s.vin):'VIN not captured'}</span>
+      <span class="row-meta"><time datetime="${E(s.createdAt)}">${E(fleetDate(s.createdAt))}</time>
+        <span class="badge ${codeCount?'amber':'neutral'}">${codeCount} CODE${codeCount===1?'':'S'}</span></span></button>`;
+  }).join('') || '<div class="empty"><p>No saved scans yet.</p></div>';
 }
 function fillVehicle(vehicle,vin='') {
   for(const key of ['make','model','year','trim','drivetrain','engine','platform','symptoms'])$('#'+key).value=vehicle[key]??'';
@@ -244,8 +257,18 @@ async function selectScan(id, changeView=true) {
 }
 $('#scan-list').addEventListener('click',e=>{const b=e.target.closest('[data-scan]');if(b)selectScan(b.dataset.scan).catch(e=>toast(e.message,true));});
 
+const emptyScanDetail = $('#scan-detail').innerHTML;
+async function deleteScan(id, createdAt) {
+  if(!window.confirm(`Delete the scan from ${fleetDate(createdAt)}? Its saved readings and diagnostic file will be permanently deleted.`))return false;
+  const result=await deleteRecord('/scans/'+encodeURIComponent(id));
+  if(state.selected?.id===id){state.selected=null;renderScan();}
+  toast(result.warning || 'Scan deleted.',Boolean(result.warning));
+  return true;
+}
+
 function renderScan() {
-  const s=state.selected;if(!s)return;
+  const s=state.selected;
+  if(!s){$('#scan-detail').innerHTML=emptyScanDetail;return;}
   const active=state.status?.adapter.scanId===s.id;
   const v=s.vehicle || {}, r=s.research || {status:'idle'};
   const group=state.vehicles.find(g=>g.scans.some(scan=>scan.id===s.id));
@@ -261,7 +284,7 @@ function renderScan() {
   $('#scan-detail').innerHTML=`
     <div class="detail-title"><div><p class="eyebrow">${s.demo?'DEMONSTRATION':'DIAGNOSTIC SESSION'}</p>
       <h2>${E(v.make)} ${E(v.model)}</h2><p>${E([v.year,v.trim,v.drivetrain,v.engine].filter(Boolean).join(' · '))}<br>${E(date(s.createdAt))}</p>
-    </div><div class="actions">${!s.demo?'<button class="button secondary" id="edit-vehicle">Edit vehicle</button>':''}<button class="button secondary" id="export">Export JSON</button></div></div>
+    </div><div class="actions">${!s.demo?'<button class="button secondary" id="edit-vehicle">Edit vehicle</button>':''}<a class="button secondary" href="/api/scans/${E(s.id)}/summary.pdf">Download PDF</a><button class="button secondary" id="export">Export JSON</button>${state.user?.role==='admin'?'<button type="button" class="button secondary danger" id="delete-scan">Delete scan</button>':''}</div></div>
     <p class="muted small">${E(s.scope||'Coverage not supplied by source.')}</p>
     <p class="vehicle-vin">${s.vin?'VIN · '+E(s.vin)+(s.vinSource==='manual'?' · manually entered':''):'VIN not captured'}</p>
     ${s.scannerId?`<p class="muted small"><a href="#scanners/${E(s.scannerId)}">${E(s.scannerIdentifier || 'Scanner profile')}</a>
@@ -278,7 +301,8 @@ function renderScan() {
     <details><summary>Raw diagnostic evidence</summary><pre>${E(JSON.stringify({protocol:s.protocol,supported:s.supported,freezeFrame:s.freezeFrame,trace:s.trace},null,2))}</pre></details>`;
   $('#scan-session')?.addEventListener('change',e=>selectScan(e.target.value,false).catch(e=>toast(e.message,true)));
   $('#edit-vehicle')?.addEventListener('click',()=>{fillVehicle(v,s.vin);view('connection');$('#model').focus();});
-  $('#export').addEventListener('click',async()=>{try{const data=await api('/scans/'+s.id+'/export');const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`obdwhiz-${v.make||'scan'}-${s.id.slice(0,8)}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(e){toast(e.message,true);}});
+  $('#delete-scan')?.addEventListener('click',event=>action(event.currentTarget,()=>deleteScan(s.id,s.createdAt)));
+  $('#export').addEventListener('click',async()=>{try{const data=await api('/scans/'+s.id+'/export');const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`proactive-${v.make||'scan'}-${s.id.slice(0,8)}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(e){toast(e.message,true);}});
   $('#research').addEventListener('click',e=>action(e.target,async()=>{await api('/scans/'+s.id+'/research',{});await selectScan(s.id,false);toast('Research started. The report will appear here.');}));
 }
 
@@ -336,7 +360,6 @@ $('#vehicle-form').addEventListener('submit',e=>{e.preventDefault();action($('#s
 });});
 $('#start-poll').addEventListener('click',e=>action(e.target,async()=>{await api('/poll',{enabled:true,pids:$$('input[name="pid"]:checked').map(i=>i.value),interval:Number($('#interval').value)});toast('Live polling started.');}));
 $('#stop-poll').addEventListener('click',e=>action(e.target,async()=>{await api('/poll',{enabled:false});toast('Live polling stopped.');}));
-$('#demo').addEventListener('click',e=>action(e.target,async()=>{state.selected=await api('/demo',{});renderScan();toast('Demonstration loaded. No vehicle or AI connection used.');}));
 
 function pickFile(selector){const input=$(selector);input.value='';input.click();}
 $('#import-scan').addEventListener('click',()=>pickFile('#file-input'));
@@ -536,6 +559,58 @@ let notificationRules = [];
 let smtpLoaded = false;
 let notificationsLoading = false;
 
+const storageForm = $('#storage-form');
+const storageStatus = $('#storage-status');
+const storageMove = $('#move-storage');
+
+function waitForStorageRestart() {
+  setTimeout(async()=>{
+    try{
+      const session=await api('/session');
+      if(!session.authenticated){location.reload();return;}
+    }catch{}
+    waitForStorageRestart();
+  },2500);
+}
+
+async function loadStorage() {
+  const storage=await api('/storage');
+  if(storage.available===false)return;
+  $('#pi-storage').hidden=false;
+  $('#storage-database').textContent=storage.database;
+  $('#storage-media').textContent=storage.media;
+  const select=storageForm.elements.drive;
+  select.replaceChildren(new Option('Select a destination',''),...storage.drives.map(drive=>{
+    const option=new Option(drive.label+(drive.id===storage.current?' (current)':drive.writable?'':' (read-only)'),drive.id);
+    option.disabled=drive.id===storage.current || !drive.writable;
+    return option;
+  }));
+  const canMove=storage.drives.some(drive=>drive.writable && drive.id!==storage.current);
+  select.disabled=storage.pending;
+  storageMove.disabled=storage.pending || !canMove;
+  storageStatus.textContent=storage.error || (storage.pending?'Moving storage. ProActive will restart.':
+    canMove?'':'No other writable storage drive is mounted.');
+}
+
+$('#refresh-storage').addEventListener('click',()=>loadStorage().catch(error=>{storageStatus.textContent=error.message;}));
+storageForm.addEventListener('submit',async event=>{
+  event.preventDefault();
+  const select=storageForm.elements.drive;
+  if(!window.confirm('Move ProActive storage to '+select.selectedOptions[0].textContent+' and restart?'))return;
+  storageMove.disabled=true;
+  $('#refresh-storage').disabled=true;
+  try{
+    await api('/storage',{drive:select.value});
+    select.disabled=true;
+    storageStatus.textContent='Moving storage. This page will reload when ProActive is back.';
+    waitForStorageRestart();
+  }catch(error){
+    storageMove.disabled=false;
+    $('#refresh-storage').disabled=false;
+    storageStatus.textContent=error.message;
+  }
+});
+
 function renderSMTP(config) {
   for(const name of ['host','port','security','sender','username'])smtpForm.elements[name].value=config[name];
   smtpForm.elements.password.value='';
@@ -635,7 +710,10 @@ $('#notification-rules').addEventListener('click',event=>{
 document.addEventListener('obd-view',event=>{
   if(!state.authenticated || state.user?.role==='user')return;
   if(event.detail==='notifications')loadNotifications().catch(error=>toast(error.message,true));
-  if(event.detail==='setup' && !smtpLoaded)api('/smtp').then(renderSMTP).catch(error=>toast(error.message,true));
+  if(event.detail==='setup') {
+    if(!smtpLoaded)api('/smtp').then(renderSMTP).catch(error=>toast(error.message,true));
+    if(state.user?.role==='admin')loadStorage().catch(error=>toast(error.message,true));
+  }
 });
 setInterval(()=>{
   if(state.authenticated && state.view==='notifications')loadNotifications().catch(()=>{});

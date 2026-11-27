@@ -109,19 +109,19 @@ class Research:
             return json.load(response)
 
     def start(self, scan_id):
-        scan = self.store.get(scan_id)
-        if scan.get('demo'):
-            raise ValueError('Demo scans are excluded from paid AI research.')
-        if not self.key:
-            raise ValueError('Add an OpenAI API key in Setup or .env to enable AI web research.')
-        if not scan['codes']:
-            raise ValueError('There are no codes in this scan to research.')
-        with self.lock:
+        with self.store.lock, self.lock:
+            scan = self.store.get(scan_id)
+            if scan.get('demo'):
+                raise ValueError('Demo scans are excluded from paid AI research.')
+            if not self.key:
+                raise ValueError('Add an OpenAI API key in Setup or .env to enable AI web research.')
+            if not scan['codes']:
+                raise ValueError('There are no codes in this scan to research.')
             if self.active:
                 raise ValueError('A research job is already running. Wait for it to finish.')
+            scan['research'] = {'status': 'running'}
+            self.store.update(scan)
             self.active.add(scan_id)
-        scan['research'] = {'status': 'running'}
-        self.store.update(scan)
         threading.Thread(target=self._run, args=(scan_id, self.key, self.model), daemon=True).start()
         return {'status': 'running'}
 

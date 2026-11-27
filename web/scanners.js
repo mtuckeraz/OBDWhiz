@@ -1,10 +1,13 @@
 'use strict';
 
 (() => {
+  const list = $('#scanner-list');
   const profile = $('#scanner-profile');
   const message = $('#scanner-message');
   const register = $('#scanner-register');
   let listEpoch = 0;
+  let listLoaded = false;
+  let profileEpoch = 0;
   let pollTimer = null;
   let profileTimer = null;
   const adapterPath = id => '/adapters/' + encodeURIComponent(id);
@@ -16,7 +19,7 @@
   const actorCanConfirm = () => state.user?.role === 'admin';
 
   function jobRows(jobs, linked = false) {
-    return jobs.map(job => `<li><strong>${E(statusLabel(job.status))}</strong> · ${E(fleetDate(job.createdAt))}
+    return jobs.map(job => `<li><strong>${job.type !== 'scan' && job.type !== 'verify' ? 'Service VIN check · ' : ''}${E(statusLabel(job.status))}</strong> · ${E(fleetDate(job.createdAt))}
       ${job.detail?.message ? `<p>${E(job.detail.message)}</p>` : ''}
       ${job.detail?.detectedVin ? `<p>Detected VIN ${E(job.detail.detectedVin)}</p>` : ''}
       ${job.scanId ? `<button type="button" class="text-button" data-result-scan="${E(job.scanId)}">Open scan</button>` : ''}
@@ -28,20 +31,46 @@
     const epoch = ++listEpoch;
     const scanners = await api('/adapters');
     if (epoch !== listEpoch || state.view !== 'scanners') return;
-    $('#scanner-list').innerHTML = scanners.map(scanner => `<a class="dossier-result" href="#scanners/${E(scanner.id)}">
-      <strong>${E(scanner.identifier)} · ${E(scanner.name || scanner.address)}</strong>
-      <span>${E(scanner.assignment ? label(scanner.assignment.vehicle) : 'Unassigned')}</span></a>`).join('');
+    list.innerHTML = scanners.map(scanner => `<details class="scanner-card" data-scanner-id="${E(scanner.id)}">
+      <summary><strong>${E(scanner.identifier)} – ${E(scanner.name || scanner.address)}</strong>
+      <span>${E(scanner.assignment ? label(scanner.assignment.vehicle) : 'Unassigned')}</span></summary></details>`).join('');
+    listLoaded = true;
     message.textContent = scanners.length ? '' : 'Connect an adapter or register one below.';
-    if (state.viewTarget) await loadProfile(state.viewTarget);
-    else {
-      profile.hidden = true;
+    await showSelectedRow();
+  }
+
+  async function showSelectedRow() {
+    clearTimeout(profileTimer);
+    ++profileEpoch;
+    const id = state.viewTarget;
+    const rows = Array.from(list.children);
+    const selected = rows.find(row => row.dataset.scannerId === id);
+    for (const row of rows) row.open = row === selected;
+    profile.hidden = !selected;
+    if (!selected) {
+      if (id) message.textContent = 'That scanner is no longer in the inventory.';
+      else if (rows.length) message.textContent = '';
+      return;
+    }
+    message.textContent = '';
+    selected.append(profile);
+    profile.innerHTML = '<p role="status">Loading scanner details…</p>';
+    try {
+      await loadProfile(id);
+    } catch (error) {
+      if (state.view === 'scanners' && state.viewTarget === id) {
+        profile.textContent = error.message;
+        report(error);
+      }
     }
   }
 
   async function loadProfile(id) {
-    clearTimeout(profileTimer);
-    const scanner = await api(adapterPath(id));
     if (state.view !== 'scanners' || state.viewTarget !== id) return;
+    clearTimeout(profileTimer);
+    const epoch = ++profileEpoch;
+    const scanner = await api(adapterPath(id));
+    if (epoch !== profileEpoch || state.view !== 'scanners' || state.viewTarget !== id) return;
     const assignment = scanner.assignment;
     const pending = scanner.jobs.find(job => job.status === 'needs_confirmation');
     const canEdit = actorCanConfirm();
@@ -49,7 +78,6 @@
     const capabilities = scanner.capabilities;
     profile.hidden = false;
     profile.innerHTML = `
-      <h2>${E(scanner.identifier)} · ${E(scanner.name || scanner.address)}</h2>
       <p class="muted">${E([scanner.manufacturer, scanner.model, scanner.firmware, scanner.address,
         scanner.ownership === 'dedicated' ? 'Vehicle-dedicated' : 'Shop-owned'].filter(Boolean).join(' · '))}</p>
       ${scanner.notes ? `<p>${E(scanner.notes)}</p>` : ''}
@@ -83,7 +111,8 @@
         await api('/scan-jobs', {type:'verify', scannerId:id});
         await loadProfile(id);
       } catch (error) {
-        $('#scanner-job-feedback').textContent = error.message;
+        const feedback = profile.querySelector('#scanner-job-feedback');
+        if (state.viewTarget === id && feedback) feedback.textContent = error.message;
         event.target.disabled = false;
       }
     };
@@ -96,6 +125,7 @@
       register.scrollIntoView({block:'start'});
     };
     if (pending) await showConfirmation(pending);
+    if (epoch !== profileEpoch) return;
     const release = profile.querySelector('[data-release-scanner]');
     if (release) release.onclick = async () => {
       if (!window.confirm('End this scanner assignment? The vehicle keeps its diagnostic history.')) return;
@@ -214,6 +244,15 @@
         event.preventDefault();
         enqueue('verify', event.currentTarget.elements.scannerId.value);
       };
+      container.querySelector('[data-diagnostic-history]').onclick = event => {
+        const button = event.target.closest('[data-delete-diagnostic]');
+        if (!button) return;
+        action(button, async () => {
+          if (await deleteScan(button.dataset.deleteDiagnostic, button.dataset.scanDate)) {
+            await dossierDiagnostics(container, true);
+          }
+        });
+      };
     }
     container.querySelector('[data-assignment-label]').innerHTML = assignment ?
       `<a href="#scanners/${E(assignment.scannerId)}">Open assigned scanner</a> · ${assignment.verifiedVin ? 'VIN verified' : 'VIN unverified'}` :
@@ -223,7 +262,8 @@
     button.dataset.scannerId = assignment?.scannerId || '';
     container.querySelector('[data-diagnostic-jobs]').innerHTML = jobRows(result.jobs, true);
     container.querySelector('[data-diagnostic-history]').innerHTML = result.scans.map(scan =>
-      `<li>${scanButton(scan)} · ${E(statusLabel(scan.status))}</li>`).join('');
+      `<li>${scanButton(scan)} · ${E(statusLabel(scan.status))}${state.user?.role === 'admin' ?
+        ` · <button type="button" class="text-button danger" data-delete-diagnostic="${E(scan.id)}" data-scan-date="${E(scan.createdAt)}">Delete scan</button>` : ''}</li>`).join('');
     const compare = container.querySelector('[data-compare-scans]');
     if (!initial && compare.elements.before.options.length !== result.scans.length) {
       const choices = result.scans.map(scan => `<option value="${E(scan.id)}">${E(fleetDate(scan.createdAt))}</option>`).join('');
@@ -240,8 +280,24 @@
     if (container) dossierDiagnostics(container, true).catch(report);
   });
   document.addEventListener('obd-view', event => {
-    if (event.detail === 'scanners' && state.authenticated) loadList().catch(report);
-    else clearTimeout(profileTimer);
+    if (event.detail === 'scanners' && state.authenticated) {
+      const id = state.viewTarget;
+      if (listLoaded && (!id || Array.from(list.children).some(row => row.dataset.scannerId === id))) {
+        showSelectedRow().catch(report);
+      } else loadList().catch(report);
+    } else {
+      listLoaded = false;
+      ++listEpoch;
+      ++profileEpoch;
+      clearTimeout(profileTimer);
+    }
+  });
+  list.addEventListener('click', event => {
+    const summary = event.target.closest('.scanner-card > summary');
+    if (!summary) return;
+    event.preventDefault();
+    const row = summary.parentElement;
+    view(row.open ? 'scanners' : 'scanners/' + row.dataset.scannerId);
   });
   document.addEventListener('click', event => {
     const button = event.target.closest('[data-result-scan]');

@@ -124,7 +124,7 @@ class Notifications:
         with self.store.lock:
             config = self._smtp()
         try:
-            send_mail(config, recipient, 'OBDWhiz email test', 'Outbound email is working for OBDWhiz.')
+            send_mail(config, recipient, 'ProActive email test', 'Outbound email is working for ProActive.')
         except (OSError, smtplib.SMTPException) as exc:
             raise ValueError(mail_error(exc)) from exc
         return {'sent': True}
@@ -216,7 +216,12 @@ class Notifications:
         job_id, scan_id, raw, attempts = row
         job = json.loads(raw)
         if 'body' not in job:
-            scan = self.store.get(scan_id)
+            try:
+                scan = self.store.get(scan_id)
+            except LookupError:
+                with self.store.lock, self.db:
+                    self.db.execute('DELETE FROM notification_outbox WHERE id=? AND scan_id=?', (job_id, scan_id))
+                return True
             vehicle = ' '.join(str(scan['vehicle'][key]) for key in ('year', 'make', 'model')
                                if scan['vehicle'].get(key)) or 'Unidentified vehicle'
             if scan.get('vin'):
@@ -237,8 +242,12 @@ class Notifications:
         for recipient in job['recipients'][:]:
             if self.stopped.is_set():
                 return False
+            with self.store.lock:
+                if not self.db.execute('SELECT 1 FROM notification_outbox WHERE id=? AND scan_id=?',
+                                       (job_id, scan_id)).fetchone():
+                    return True
             try:
-                send_mail(config, recipient, f"OBDWhiz alert: {job['name']}", job['body'])
+                send_mail(config, recipient, f"ProActive alert: {job['name']}", job['body'])
             except (OSError, smtplib.SMTPException) as exc:
                 failed.append(recipient)
                 error = mail_error(exc)

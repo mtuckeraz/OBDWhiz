@@ -64,7 +64,10 @@
       <h2>${v.id ? 'Edit vehicle' : 'Add vehicle'}</h2>
       <div class="dossier-grid">${fields.map(([field, label]) => `
         <label>${label}<input name="${field}" value="${E(v[field] ?? '')}" ${field === 'year'
-          ? 'type="number" min="1886" max="2100"' : 'maxlength="' + (field === 'vin' ? 17 : 120) + '"'}></label>`).join('')}</div>
+          ? 'type="number" min="1886" max="2100"' : 'maxlength="' + (field === 'vin' ? 17 : 120) + '"'}></label>`).join('')}
+        <label>Garaging Location<input name="garagingLocation" maxlength="250" value="${E(v.garagingLocation ?? '')}"></label>
+      </div>
+      <label>Notes<textarea name="profileNotes" rows="4" maxlength="4000">${E(v.profileNotes ?? '')}</textarea></label>
       <div class="actions spaced"><button class="button primary">Save vehicle</button>
       <button class="button secondary" type="button" id="dossier-cancel">Cancel</button></div>
     </form>`;
@@ -125,8 +128,10 @@
       <p class="muted">${E([v.owner, v.plate, v.jurisdiction, v.color, v.trim, v.engine].filter(Boolean).join(' · '))}</p></div>
       <div class="actions">
         <button type="button" id="dossier-add-photos" class="button primary">Add photos</button>
-        ${user.role === 'admin' ? '<button type="button" id="dossier-edit-button" class="button secondary">Edit vehicle</button>' : ''}
+        ${user.role === 'admin' ? '<button type="button" id="dossier-edit-button" class="button secondary">Edit vehicle</button><button type="button" id="dossier-delete-button" class="button secondary danger">Delete vehicle</button>' : ''}
       </div></div>
+      ${v.garagingLocation ? `<p><strong>Garaging Location</strong> · ${E(v.garagingLocation)}</p>` : ''}
+      ${v.profileNotes ? `<h3>Notes</h3><p class="dossier-profile-notes">${E(v.profileNotes)}</p>` : ''}
       <details open><summary>Diagnostics</summary><div data-dossier-diagnostics="${E(v.id)}"></div></details>
       <h3>Add photos or documents</h3>
       <form id="dossier-upload">
@@ -162,6 +167,23 @@
         ${v.owners.map(owner => `<p>${E(owner.name)} · ${E(fleetDate(owner.startedAt))} to ${owner.endedAt ? E(fleetDate(owner.endedAt)) : 'present'}</p>`).join('')}
       </details>`;
     $('#dossier-edit-button')?.addEventListener('click', () => editor(v));
+    $('#dossier-delete-button')?.addEventListener('click', event => {
+      const name = [title(v), v.vin || v.plate].filter(Boolean).join(' · ');
+      if (!window.confirm(`Delete ${name}? The vehicle record, notes, photos and documents will be permanently deleted. Saved scans will remain in Overview.`)) return;
+      action(event.currentTarget, async () => {
+        const result = await deleteRecord('/dossiers/' + encodeURIComponent(v.id));
+        if (state.selected?.vehicleId === v.id) {
+          delete state.selected.vehicleId;
+          renderScan();
+        }
+        vehicle = null;
+        comparison.clear();
+        detail.replaceChildren();
+        detail.hidden = true;
+        view('dossiers');
+        toast(result.warning || 'Vehicle deleted.', Boolean(result.warning));
+      });
+    });
     $('#dossier-add-photos').addEventListener('click', () => {
       const form = $('#dossier-upload');
       form.scrollIntoView({block:'start'});

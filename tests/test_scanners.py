@@ -142,6 +142,28 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reopened.job(running['id'])['status'], 'failed')
         self.assertEqual(reopened.next_job()['id'], queued['id'])
 
+    async def test_special_function_verifies_vin_without_scanning_or_programming(self):
+        with self.store.lock, self.store.db:
+            assignment = self.registry.assign(self.scanner['id'], self.ford['id'], 'obd_vin', F450, ACTOR)
+        self.manual.read_vin = AsyncMock(return_value=F450)
+        self.manual.scan = AsyncMock()
+        with self.assertRaisesRegex(ValueError, 'not listed'):
+            self.registry.enqueue(self.scanner['id'], self.ford['id'], ACTOR, 'mercedes_rear_brakes')
+        self.registry.enqueue(self.scanner['id'], self.ford['id'], ACTOR, 'ford_tire_size', tire_size='35x12.50R20')
+        job = await self.execute_next()
+        self.assertEqual(job['status'], 'complete')
+        self.assertEqual(job['detail']['confirmedVin'], F450)
+        self.assertEqual(job['detail']['requestedTireSize'], '35X12.50R20')
+        self.assertIsNone(job['scanId'])
+        self.assertEqual(self.registry.current(scanner_id=self.scanner['id'])['id'], assignment['id'])
+        self.manual.scan.assert_not_awaited()
+
+        self.manual.read_vin.return_value = ROVER
+        self.registry.enqueue(self.scanner['id'], self.ford['id'], ACTOR, 'ford_tire_size', tire_size='LT275/70R18')
+        with self.assertRaisesRegex(ValueError, 'did not return the VIN recorded'):
+            await self.execute_next()
+        self.manual.scan.assert_not_awaited()
+
     def test_backfill_loads_each_scanner_once_and_links_all_legacy_scans(self):
         records = [self.store.save_scan({'vehicle': {}, 'codes': [], 'vin': F450,
                                          'reader': {'address': address}})

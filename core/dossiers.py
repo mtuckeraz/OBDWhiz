@@ -11,6 +11,7 @@ from uuid import uuid4
 from .store import normalize_vin
 
 FIELDS = ('make', 'model', 'year', 'trim', 'engine', 'color', 'plate', 'jurisdiction')
+PROFILE_FIELDS = (('garagingLocation', 'Garaging location', 250), ('profileNotes', 'Notes', 4000))
 ROLES = ('admin', 'user')
 INITIAL_PASSWORD = '123456'
 SCHEMA = """
@@ -176,6 +177,11 @@ class Dossiers:
             for key in FIELDS:
                 if key in data and key != 'year':
                     details[key] = clean(data[key], 120, key)
+            for key, label, limit in PROFILE_FIELDS:
+                if key in data:
+                    details[key] = clean(data[key], limit, label)
+                elif key in before:
+                    details[key] = before[key]
             if 'year' in data:
                 year = data['year']
                 if year is not None and (type(year) is not int or not 1886 <= year <= 2100):
